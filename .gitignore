@@ -1,0 +1,29 @@
+# Python venv
+Quran_backend/venv/
+venv/
+
+# Node modules
+quran_frontend/node_modules/
+
+# Python cache
+__pycache__/
+Quran_backend/__pycache__/
+*.pyc
+
+# Env files (secrets)
+*.env
+
+# Databases / local data
+Quran_backend/users.db
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Build outputs
+quran_frontend/dist/
+quran_frontend/build/
+
+# System files
+.DS_Store
+Thumbs.db

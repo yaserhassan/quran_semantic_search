@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-jose[cryptography]
+passlib[bcrypt]
+requests
+pydantic
+pandas
+numpy
+faiss-cpu
+sentence-transformers
+openpyxl
+google-auth
+google-auth-oauthlib
+python-dotenv
+bcrypt==4.0.1
+passlib[bcrypt]

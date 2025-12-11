@@ -1,0 +1,5 @@
+backend/.env
+backend/users.db
+backend/__pycache__/
+backend/.venv/
+backend/venv/
