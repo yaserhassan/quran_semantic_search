@@ -69,7 +69,7 @@ export async function googleLogin(idToken) {
   return data.access_token;
 }
 
-export async function searchVerses(token, query, topK) {
+export async function searchVerses(token, query, page = 1, pageSize = 10) {
   const res = await fetch(`${API_BASE}/search`, {
     method: "POST",
     headers: {
@@ -78,7 +78,8 @@ export async function searchVerses(token, query, topK) {
     },
     body: JSON.stringify({
       query: query.trim(),
-      top_k: topK,
+      page,
+      page_size: pageSize,
     }),
   });
 
@@ -88,5 +89,11 @@ export async function searchVerses(token, query, topK) {
     throw new Error(data.detail || `Search failed (${res.status})`);
   }
 
-  return data.results || [];
+  return {
+    results: data.results || [],
+    total: data.total || 0,
+    page: data.page || page,
+    pageSize: data.page_size || pageSize,
+  };
 }
+

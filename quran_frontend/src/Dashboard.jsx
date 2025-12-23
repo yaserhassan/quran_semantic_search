@@ -3,20 +3,18 @@ import { searchVerses } from "./api";
 
 function Dashboard({ token, onLogout }) {
   const [query, setQuery] = useState("");
-  const [topK, setTopK] = useState(50);
   const [results, setResults] = useState([]);
+  const [total, setTotal] = useState(0);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const RESULTS_PER_PAGE = 10;
   const [currentPage, setCurrentPage] = useState(1);
 
-  const totalResults = results.length;
-  const totalPages = Math.ceil(totalResults / RESULTS_PER_PAGE) || 1;
-  const startIndex = (currentPage - 1) * RESULTS_PER_PAGE;
-  const endIndex = startIndex + RESULTS_PER_PAGE;
-  const currentPageResults = results.slice(startIndex, endIndex);
+  const totalPages = Math.max(1, Math.ceil(total / RESULTS_PER_PAGE));
 
+  // ===== SEARCH =====
   const handleSearch = async (e) => {
     e.preventDefault();
 
@@ -30,27 +28,50 @@ function Dashboard({ token, onLogout }) {
       return;
     }
 
-    setError("");
     setLoading(true);
-    setResults([]);
-    setCurrentPage(1);
+    setError("");
 
     try {
-      const data = await searchVerses(token, trimmed, topK);
-      setResults(data);
+      setCurrentPage(1);
+      const data = await searchVerses(
+        token,
+        trimmed,
+        1,
+        RESULTS_PER_PAGE
+      );
+      setResults(data.results); // نتائج الصفحة فقط
+      setTotal(data.total);     // العدد الكلي من السيرفر
     } catch (err) {
-      console.error(err);
-      setError(err.message || "Something went wrong while searching.");
+      setError(err.message || "Search failed");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleChangePage = (direction) => {
-    setCurrentPage((prev) => {
-      if (direction === "prev") return Math.max(1, prev - 1);
-      return Math.min(totalPages, prev + 1);
-    });
+  // ===== PAGINATION =====
+  const goToPage = async (p) => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+
+    const page = Math.min(Math.max(1, p), totalPages);
+
+    setLoading(true);
+    setError("");
+    try {
+      const data = await searchVerses(
+        token,
+        trimmed,
+        page,
+        RESULTS_PER_PAGE
+      );
+      setResults(data.results);
+      setTotal(data.total);
+      setCurrentPage(page);
+    } catch (err) {
+      setError(err.message || "Search failed");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -64,19 +85,18 @@ function Dashboard({ token, onLogout }) {
           </button>
         </div>
 
-        {/* Intro box */}
+        {/* Intro */}
         <div className="dashboard-intro">
           <p>
             This system provides <b>semantic search</b> for Qur&apos;anic verses.
           </p>
           <p>
-            You can type a word in <b>Arabic</b> or <b>English</b>, and the
-            system will retrieve the most related verses by <b>meaning</b>, not
-            only by exact keywords.
+            You can type a word in <b>Arabic</b> or <b>English</b>, and the system
+            will retrieve the most related verses by <b>meaning</b>.
           </p>
         </div>
 
-        {/* Search form */}
+        {/* Search */}
         <form className="dashboard-search-form" onSubmit={handleSearch}>
           <input
             className="form-input"
@@ -85,17 +105,6 @@ function Dashboard({ token, onLogout }) {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Enter your question..."
           />
-          <select
-            className="form-select"
-            value={topK}
-            onChange={(e) => setTopK(Number(e.target.value))}
-          >
-            <option value={5}>5 results</option>
-            <option value={10}>10 results</option>
-            <option value={20}>20 results</option>
-            <option value={50}>50 results</option>
-            <option value={100}>100 results</option>
-          </select>
           <button
             type="submit"
             disabled={loading}
@@ -117,61 +126,50 @@ function Dashboard({ token, onLogout }) {
             </p>
           )}
 
-          {results.length > 0 && (
+          {total > 0 && (
             <p className="results-summary">
-              Found <b>{totalResults}</b> verses for query:{" "}
+              Found <b>{total}</b> verses for query:{" "}
               <span className="results-query">{query}</span>
             </p>
           )}
 
           <div className="results-list">
-            {currentPageResults.map((r) => (
+            {results.map((r) => (
               <div
-                key={`${r.sura}:${r.ayah}-${r.rank}`}
+                key={`${r.ref}-${r.rank}`}
                 className="result-card"
               >
                 <div className="result-meta">
                   <span>
-                    Rank {r.rank} • Sura {r.sura}, Ayah {r.ayah}
+                    Rank {r.rank} • Ref {r.ref}
                   </span>
-                  <span>Score: {r.score.toFixed(3)}</span>
                 </div>
+
                 <p className="arabic-verse">{r.arabic}</p>
                 <p className="english-verse">{r.english}</p>
               </div>
             ))}
           </div>
 
-          {totalResults > 0 && (
+          {total > 0 && (
             <div className="pagination-row">
               <span>
-                Showing{" "}
-                {totalResults === 0
-                  ? 0
-                  : `${startIndex + 1}–${Math.min(
-                      endIndex,
-                      totalResults
-                    )}`}{" "}
-                of {totalResults} results
+                Page {currentPage} of {totalPages}
               </span>
 
               {totalPages > 1 && (
                 <div className="pagination-buttons">
                   <button
-                    onClick={() => handleChangePage("prev")}
-                    disabled={currentPage === 1}
+                    onClick={() => goToPage(currentPage - 1)}
+                    disabled={currentPage === 1 || loading}
                     className="pagination-btn"
                   >
-                    Prev
+                    Previous
                   </button>
 
-                  <span>
-                    Page {currentPage} of {totalPages}
-                  </span>
-
                   <button
-                    onClick={() => handleChangePage("next")}
-                    disabled={currentPage === totalPages}
+                    onClick={() => goToPage(currentPage + 1)}
+                    disabled={currentPage === totalPages || loading}
                     className="pagination-btn"
                   >
                     Next
