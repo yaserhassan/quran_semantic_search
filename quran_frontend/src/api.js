@@ -69,7 +69,7 @@ export async function googleLogin(idToken) {
   return data.access_token;
 }
 
-export async function searchVerses(token, query, page = 1, pageSize = 10) {
+export async function searchVerses(token, query) {
   const res = await fetch(`${API_BASE}/search`, {
     method: "POST",
     headers: {
@@ -78,8 +78,6 @@ export async function searchVerses(token, query, page = 1, pageSize = 10) {
     },
     body: JSON.stringify({
       query: query.trim(),
-      page,
-      page_size: pageSize,
     }),
   });
 
@@ -92,8 +90,7 @@ export async function searchVerses(token, query, page = 1, pageSize = 10) {
   return {
     results: data.results || [],
     total: data.total || 0,
-    page: data.page || page,
-    pageSize: data.page_size || pageSize,
   };
 }
+
 

@@ -100,16 +100,12 @@ class VerseResult(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str
-    page: int = 1
-    page_size: int = 10
     k_faiss: int = 1200
     top_expansions: int = 12
 
 class SearchResponse(BaseModel):
     query: str
     total: int
-    page: int
-    page_size: int
     results: List[VerseResult]
 
 
@@ -217,8 +213,6 @@ def search(req: SearchRequest, current_user: str = Header(None, alias="Authoriza
 
     results, info = search_api(
         req.query,
-        page=req.page,
-        page_size=req.page_size,
         k_faiss=req.k_faiss,
         top_expansions=req.top_expansions,
         rerank_batch=32
@@ -235,8 +229,6 @@ def search(req: SearchRequest, current_user: str = Header(None, alias="Authoriza
     return {
         "query": req.query,
         "total": info["total"],
-        "page": info["page"],
-        "page_size": info["page_size"],
         "results": verse_results
     }
 

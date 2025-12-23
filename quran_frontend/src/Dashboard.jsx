@@ -32,15 +32,10 @@ function Dashboard({ token, onLogout }) {
     setError("");
 
     try {
-      setCurrentPage(1);
-      const data = await searchVerses(
-        token,
-        trimmed,
-        1,
-        RESULTS_PER_PAGE
-      );
-      setResults(data.results); // نتائج الصفحة فقط
-      setTotal(data.total);     // العدد الكلي من السيرفر
+      const data = await searchVerses(token, trimmed);
+      setResults(data.results); // كل النتائج مرة واحدة
+      setTotal(data.total);     // العدد النهائي
+      setCurrentPage(1);        // نرجع للصفحة الأولى
     } catch (err) {
       setError(err.message || "Search failed");
     } finally {
@@ -48,31 +43,16 @@ function Dashboard({ token, onLogout }) {
     }
   };
 
-  // ===== PAGINATION =====
-  const goToPage = async (p) => {
-    const trimmed = query.trim();
-    if (!trimmed) return;
-
+  // ===== PAGINATION (محلي) =====
+  const goToPage = (p) => {
     const page = Math.min(Math.max(1, p), totalPages);
-
-    setLoading(true);
-    setError("");
-    try {
-      const data = await searchVerses(
-        token,
-        trimmed,
-        page,
-        RESULTS_PER_PAGE
-      );
-      setResults(data.results);
-      setTotal(data.total);
-      setCurrentPage(page);
-    } catch (err) {
-      setError(err.message || "Search failed");
-    } finally {
-      setLoading(false);
-    }
+    setCurrentPage(page);
   };
+
+  // ===== عرض نتائج الصفحة الحالية =====
+  const start = (currentPage - 1) * RESULTS_PER_PAGE;
+  const end = start + RESULTS_PER_PAGE;
+  const pageResults = results.slice(start, end);
 
   return (
     <div className="page-bg">
@@ -134,17 +114,13 @@ function Dashboard({ token, onLogout }) {
           )}
 
           <div className="results-list">
-            {results.map((r) => (
-              <div
-                key={`${r.ref}-${r.rank}`}
-                className="result-card"
-              >
+            {pageResults.map((r) => (
+              <div key={`${r.ref}-${r.rank}`} className="result-card">
                 <div className="result-meta">
                   <span>
                     Rank {r.rank} • Ref {r.ref}
                   </span>
                 </div>
-
                 <p className="arabic-verse">{r.arabic}</p>
                 <p className="english-verse">{r.english}</p>
               </div>
@@ -161,7 +137,7 @@ function Dashboard({ token, onLogout }) {
                 <div className="pagination-buttons">
                   <button
                     onClick={() => goToPage(currentPage - 1)}
-                    disabled={currentPage === 1 || loading}
+                    disabled={currentPage === 1}
                     className="pagination-btn"
                   >
                     Previous
@@ -169,7 +145,7 @@ function Dashboard({ token, onLogout }) {
 
                   <button
                     onClick={() => goToPage(currentPage + 1)}
-                    disabled={currentPage === totalPages || loading}
+                    disabled={currentPage === totalPages}
                     className="pagination-btn"
                   >
                     Next

@@ -178,7 +178,6 @@ def maqas_family_vkeys_ar(base: str) -> set:
     if not b:
         return set()
     out = set(inv_ar.get(b, set()))
-    # family: prefix or substring (simple, works well for demo)
     for tok, vset in inv_ar.items():
         if tok == b or tok.startswith(b) or (b in tok):
             out |= vset
@@ -188,29 +187,20 @@ def maqas_candidates_ar(query_ar: str) -> Tuple[set, List[str]]:
     q = normalize_ar(query_ar)
     if not q:
         return set(), []
-
     raw = [normalize_ar(x) for x in str(query_ar).split() if normalize_ar(x)]
     if not raw:
         raw = [q]
-
-    # tokens + remove "ال" variant for mining (NOT guaranteed)
     toks = []
     for t in raw:
         toks.append(t)
         if t.startswith("ال") and len(t) > 2:
             toks.append(t[2:])
-
-    # unique keep order
     seen = set()
     toks = [t for t in toks if not (t in seen or seen.add(t))]
-
-    # ✅ GUARANTEED = exact token only (NO startswith/contains)
     out = set()
     for t in toks[:6]:
         out |= inv_ar.get(t, set())
-
     return out, toks
-
 
 def maqas_candidates_en(query_en: str) -> Tuple[set, List[str]]:
     toks = [t for t in normalize_en(query_en).split() if len(t) >= 4]
@@ -247,7 +237,6 @@ def exact_word_hits_en(word_en: str) -> List[int]:
     needle = f" {w} "
     return [i for i, txt in enumerate(verse_en_norm) if needle in f" {txt} "]
 
-
 # ===================== Expansion mining (Arabic) =====================
 def pick_anchor_tokens_ar(query_ar: str, max_tokens=2) -> List[str]:
     toks = [t for t in normalize_ar(query_ar).split() if t and t not in AR_STOP and len(t) >= 3]
@@ -262,26 +251,20 @@ def extract_ngrams_containing_anchor(text: str, anchors: List[str], n_min=2, n_m
     out = []
     if not words or not anchors:
         return out
-
     for n in range(n_min, n_max+1):
         for i in range(0, len(words)-n+1):
             ng = words[i:i+n]
             if not any(a in ng for a in anchors):
                 continue
-
-            # filters
             if ng[0] in AR_STOP or ng[-1] in AR_STOP:
                 continue
-
             content = [t for t in ng if (t not in AR_STOP and len(t) >= 3)]
             if len(content) < 2:
                 continue
-
             if "يوم" in anchors and "يوم" in ng:
                 j = ng.index("يوم")
                 if j+1 < len(ng) and ng[j+1] in AR_STOP:
                     continue
-
             out.append(" ".join(ng))
     return out
 
@@ -290,21 +273,16 @@ def mine_expansions_ar(query_ar: str, guaranteed_ids: List[int], top_exp=20) -> 
     anchors = pick_anchor_tokens_ar(query_ar, max_tokens=2)
     if not guaranteed_ids or not anchors:
         return [], anchors
-
     from collections import Counter
     ref_counts = Counter()
     global_counts = Counter()
-
-    # global counts for anchor ngrams
     for txt in verse_ar_norm:
         for ph in set(extract_ngrams_containing_anchor(txt, anchors, 2, 4)):
             global_counts[ph] += 1
-
     for ix in guaranteed_ids:
         txt = verse_ar_norm[int(ix)]
         for ph in set(extract_ngrams_containing_anchor(txt, anchors, 2, 4)):
             ref_counts[ph] += 1
-
     scored = []
     for ph, c in ref_counts.items():
         if ph == qn:
@@ -315,9 +293,7 @@ def mine_expansions_ar(query_ar: str, guaranteed_ids: List[int], top_exp=20) -> 
         score = c / (g + 1.0)
         if c >= 2 or len(guaranteed_ids) < 25:
             scored.append((ph, score, c, g))
-
     scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
-
     final = []
     seen = set()
     for ph, _, _, _ in scored:
@@ -327,18 +303,14 @@ def mine_expansions_ar(query_ar: str, guaranteed_ids: List[int], top_exp=20) -> 
         final.append(ph)
         if len(final) >= top_exp:
             break
-
     return final, anchors
 
 # ===================== Main Search =====================
 def search_api(query: str,
-               page: int = 1,
-               page_size: int = 10,
                k_faiss: int = 1200,
                top_expansions: int = 12,
                rerank_limit_non_guaranteed: int = 250,
                rerank_batch: int = 32) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-
 
     q = (query or "").strip()
     if not q:
@@ -349,22 +321,18 @@ def search_api(query: str,
     # (1) guaranteed set
     if ar_query:
         maqas_vkeys, toks = maqas_candidates_ar(q)
-
         qn = normalize_ar(q)
         if " " in qn:
             phrase_ids = exact_phrase_hits_ar(q)
         else:
-            # كلمة واحدة: match كلمة كاملة
             phrase_ids = exact_word_hits_ar(q)
     else:
         maqas_vkeys, toks = maqas_candidates_en(q)
-
         qn = normalize_en(q)
         if " " in qn:
             phrase_ids = exact_phrase_hits_en(q)
         else:
             phrase_ids = exact_word_hits_en(q)
-
 
     maqas_ids = []
     for vk in maqas_vkeys:
@@ -387,10 +355,16 @@ def search_api(query: str,
         embed_q = q
 
     faiss_ids, faiss_scores = faiss_candidate_ids(embed_q, k_retrieve=k_faiss)
-    faiss_set = set(faiss_ids.tolist())
 
+    # map faiss score
+    id2fs = {int(i): float(s) for i, s in zip(faiss_ids.tolist(), faiss_scores.tolist())}
 
-    # (4) expansion phrase hits candidates
+    # non-guaranteed from faiss (limit)
+    other_part = [int(ix) for ix in faiss_ids.tolist() if int(ix) not in guaranteed_set]
+    other_part.sort(key=lambda x: id2fs.get(int(x), -1e9), reverse=True)
+    other_part = other_part[:rerank_limit_non_guaranteed]
+
+    # expansion phrase hits
     exp_ids = []
     exp_phrase_hits = {}
     if ar_query and expansions:
@@ -401,50 +375,28 @@ def search_api(query: str,
     if exp_phrase_hits:
         exp_ids = sorted(set([i for lst in exp_phrase_hits.values() for i in lst]))
 
-    union_ids = sorted(set(guaranteed_ids) | faiss_set | set(exp_ids))
+    # union candidate pool
+    union_ids = sorted(set(guaranteed_ids) | set(exp_ids) | set(other_part))
     if not union_ids:
         return [], {"error": "no candidates"}
 
-    # (5) rerank (ordering only)
+    # (4) rerank
     if ar_query:
         rr_query = f"أوجد آيات في القرآن تتعلق بمفهوم: {q}. أعد الآيات المرتبطة معنى وسياقًا."
     else:
         rr_query = f"Find Quran verses that discuss the concept of: {q}. Return verses related by meaning and context."
 
-    # ---- speed: rerank only a limited subset (keep ALL guaranteed) ----
-
-    # get FAISS scores for embed_q (fast) to prefilter non-guaranteed
-    id2fs = {int(i): float(s) for i, s in zip(faiss_ids.tolist(), faiss_scores.tolist())}
-
-    # split union into guaranteed + others
-    guaranteed_part = [ix for ix in union_ids if int(ix) in guaranteed_set]
-    other_part = [ix for ix in union_ids if int(ix) not in guaranteed_set]
-
-    # prefilter others by FAISS score (fast)
-    other_part.sort(key=lambda x: id2fs.get(int(x), -1e9), reverse=True)
-    other_part = other_part[:rerank_limit_non_guaranteed]
-
-    # final rerank list
-    rerank_ids = guaranteed_part + other_part
-
-
-    # rerank only these
-    passages = [build_passage(ix) for ix in rerank_ids]
+    passages = [build_passage(ix) for ix in union_ids]
     rr_scores = rerank_bge(rr_query, passages, batch_size=rerank_batch, max_length=384)
+    rr_map = {int(ix): float(sc) for ix, sc in zip(union_ids, rr_scores)}
 
-    # build a map for scores (for items not reranked, assign very low score)
-    rr_map = {int(ix): float(sc) for ix, sc in zip(rerank_ids, rr_scores)}
-
-
-    # (6) build rows + priority layers
+    # ===================== Build rows =====================
     q_phrase = normalize_ar(q) if ar_query else normalize_en(q)
-
     rows = []
     for ix in union_ids:
         row = df_verses.iloc[int(ix)]
         vk = row_to_vkey[int(ix)]
 
-        # normalize verse text for exact checks
         if ar_query:
             txt_norm = verse_ar_norm[int(ix)]
             if " " in q_phrase:
@@ -470,7 +422,6 @@ def search_api(query: str,
 
         guaranteed = 1 if int(ix) in guaranteed_set else 0
 
-        # priority: 3 exact phrase, 2 expansion, 1 guaranteed-family, 0 semantic
         priority = 0
         if is_exact_phrase:
             priority = 3
@@ -493,31 +444,24 @@ def search_api(query: str,
             "english": str(row[EN_COL]),
         })
 
-
     df = pd.DataFrame(rows)
-
-    # order by priority then score
     df = df.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
-    total = len(df)
 
-    # pagination slice
-    page = max(1, int(page))
-    page_size = max(1, min(50, int(page_size)))  # سقف 50 للحماية
-    start = (page - 1) * page_size
-    end = start + page_size
+    # ===================== Final filtering =====================
+    df_keep = df[df["priority"] > 0].copy()
+    df_sem = df[df["priority"] == 0].copy()
+    df_sem = df_sem.sort_values("score_rr", ascending=False)
+    TOP_SEM = 150
+    RR_MIN = -5.0
+    df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM)
+    df_final = pd.concat([df_keep, df_sem], ignore_index=True)
+    df_final = df_final.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
+    df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
 
-    df_page = df.iloc[start:end].copy()
-    df_page.insert(0, "rank", np.arange(start + 1, start + 1 + len(df_page)))
-
-    results = df_page[["rank","ref","arabic","english"]].to_dict(orient="records")
-
+    results = df_final[["rank", "ref", "arabic", "english"]].to_dict(orient="records")
     info = {
         "query": q,
         "ar_query": bool(ar_query),
-        "total": int(total),
-        "page": int(page),
-        "page_size": int(page_size),
+        "total": int(len(df_final)),
     }
     return results, info
-
-
