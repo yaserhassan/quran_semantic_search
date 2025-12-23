@@ -123,6 +123,7 @@ app = FastAPI(
 origins = [
     "http://localhost:3000",
     "http://localhost:5173",
+    "https://nonvariable-serriedly-wynona.ngrok-free.dev"
 ]
 app.add_middleware(
     CORSMiddleware,
