@@ -228,7 +228,7 @@ def search(req: SearchRequest, current_user: str = Header(None, alias="Authoriza
     verse_results = [VerseResult(**r) for r in cleaned]
     return {
         "query": req.query,
-        "total": info["total"],
+        "total": info.get("total", len(results)),
         "results": verse_results
     }
 

@@ -314,30 +314,21 @@ def search_api(query: str,
 
     q = (query or "").strip()
     if not q:
-        return [], {"error": "empty"}
+        return [], {"error": "empty", "total": 0}
 
     ar_query = is_arabic(q)
 
-    # (1) guaranteed set
+    # (1) guaranteed set (exact word or exact phrase) + MAQAS exact tokens
     if ar_query:
         maqas_vkeys, toks = maqas_candidates_ar(q)
         qn = normalize_ar(q)
-        if " " in qn:
-            phrase_ids = exact_phrase_hits_ar(q)
-        else:
-            phrase_ids = exact_word_hits_ar(q)
+        phrase_ids = exact_phrase_hits_ar(q) if " " in qn else exact_word_hits_ar(q)
     else:
         maqas_vkeys, toks = maqas_candidates_en(q)
         qn = normalize_en(q)
-        if " " in qn:
-            phrase_ids = exact_phrase_hits_en(q)
-        else:
-            phrase_ids = exact_word_hits_en(q)
+        phrase_ids = exact_phrase_hits_en(q) if " " in qn else exact_word_hits_en(q)
 
-    maqas_ids = []
-    for vk in maqas_vkeys:
-        if vk in vkey_to_row:
-            maqas_ids.append(vkey_to_row[vk])
+    maqas_ids = [vkey_to_row[vk] for vk in maqas_vkeys if vk in vkey_to_row]
     maqas_ids = sorted(set(maqas_ids))
 
     guaranteed_ids = sorted(set(maqas_ids) | set(phrase_ids))
@@ -348,23 +339,19 @@ def search_api(query: str,
     if ar_query:
         expansions, anchors = mine_expansions_ar(q, guaranteed_ids, top_exp=top_expansions)
 
-    # (3) FAISS candidates
+    # (3) FAISS candidates pool (we will LIMIT non-guaranteed)
+    embed_q = q
     if ar_query and expansions:
         embed_q = normalize_ar(q) + " ; " + " ; ".join(expansions[:8])
-    else:
-        embed_q = q
 
     faiss_ids, faiss_scores = faiss_candidate_ids(embed_q, k_retrieve=k_faiss)
-
-    # map faiss score
     id2fs = {int(i): float(s) for i, s in zip(faiss_ids.tolist(), faiss_scores.tolist())}
 
-    # non-guaranteed from faiss (limit)
     other_part = [int(ix) for ix in faiss_ids.tolist() if int(ix) not in guaranteed_set]
     other_part.sort(key=lambda x: id2fs.get(int(x), -1e9), reverse=True)
     other_part = other_part[:rerank_limit_non_guaranteed]
 
-    # expansion phrase hits
+    # (4) expansion phrase hits
     exp_ids = []
     exp_phrase_hits = {}
     if ar_query and expansions:
@@ -375,23 +362,25 @@ def search_api(query: str,
     if exp_phrase_hits:
         exp_ids = sorted(set([i for lst in exp_phrase_hits.values() for i in lst]))
 
-    # union candidate pool
+    # Final candidate pool
     union_ids = sorted(set(guaranteed_ids) | set(exp_ids) | set(other_part))
     if not union_ids:
-        return [], {"error": "no candidates"}
+        return [], {"error": "no candidates", "total": 0}
 
-    # (4) rerank
+    # (5) reranker query
     if ar_query:
         rr_query = f"أوجد آيات في القرآن تتعلق بمفهوم: {q}. أعد الآيات المرتبطة معنى وسياقًا."
     else:
         rr_query = f"Find Quran verses that discuss the concept of: {q}. Return verses related by meaning and context."
 
+    # rerank only union_ids (union already limited)
     passages = [build_passage(ix) for ix in union_ids]
     rr_scores = rerank_bge(rr_query, passages, batch_size=rerank_batch, max_length=384)
     rr_map = {int(ix): float(sc) for ix, sc in zip(union_ids, rr_scores)}
 
-    # ===================== Build rows =====================
+    # (6) build rows + priority layers
     q_phrase = normalize_ar(q) if ar_query else normalize_en(q)
+
     rows = []
     for ix in union_ids:
         row = df_verses.iloc[int(ix)]
@@ -399,16 +388,14 @@ def search_api(query: str,
 
         if ar_query:
             txt_norm = verse_ar_norm[int(ix)]
-            if " " in q_phrase:
-                is_exact_phrase = int(q_phrase in txt_norm)
-            else:
-                is_exact_phrase = int(f" {q_phrase} " in f" {txt_norm} ")
         else:
             txt_norm = verse_en_norm[int(ix)]
-            if " " in q_phrase:
-                is_exact_phrase = int(q_phrase in txt_norm)
-            else:
-                is_exact_phrase = int(f" {q_phrase} " in f" {txt_norm} ")
+
+        # exact word vs exact phrase
+        if " " in q_phrase:
+            is_exact_phrase = int(q_phrase in txt_norm)
+        else:
+            is_exact_phrase = int(f" {q_phrase} " in f" {txt_norm} ")
 
         matched_exp = ""
         is_expansion_hit = 0
@@ -422,6 +409,7 @@ def search_api(query: str,
 
         guaranteed = 1 if int(ix) in guaranteed_set else 0
 
+        # priority: 3 exact, 2 expansion, 1 guaranteed, 0 semantic
         priority = 0
         if is_exact_phrase:
             priority = 3
@@ -433,13 +421,8 @@ def search_api(query: str,
         rows.append({
             "ix": int(ix),
             "ref": vk,
-            "sura": int(row[SURA_COL]),
-            "ayah": int(row[AYAH_COL]),
             "score_rr": float(rr_map.get(int(ix), -999.0)),
             "priority": int(priority),
-            "exact_phrase": int(is_exact_phrase),
-            "guaranteed": int(guaranteed),
-            "matched_expansion": matched_exp,
             "arabic": str(row[AR_DIAC]),
             "english": str(row[EN_COL]),
         })
@@ -447,21 +430,27 @@ def search_api(query: str,
     df = pd.DataFrame(rows)
     df = df.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
 
-    # ===================== Final filtering =====================
+    # ✅ Final filtering (هذا اللي يخلي total منطقي)
     df_keep = df[df["priority"] > 0].copy()
+
     df_sem = df[df["priority"] == 0].copy()
     df_sem = df_sem.sort_values("score_rr", ascending=False)
+
     TOP_SEM = 150
     RR_MIN = -5.0
     df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM)
+
     df_final = pd.concat([df_keep, df_sem], ignore_index=True)
     df_final = df_final.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
+
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
 
     results = df_final[["rank", "ref", "arabic", "english"]].to_dict(orient="records")
+
     info = {
         "query": q,
         "ar_query": bool(ar_query),
         "total": int(len(df_final)),
     }
     return results, info
+
