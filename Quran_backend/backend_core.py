@@ -66,6 +66,9 @@ AR_STOP = set([
     "كان","كانت","يكون","يكونون","الذين","التي","الذي","بينهم","فيما","الي"
 ])
 
+
+print("BACKEND_CORE LOADED FROM:", __file__)
+
 # ===================== Load data/index/models =====================
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 

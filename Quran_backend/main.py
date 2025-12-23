@@ -226,6 +226,8 @@ def search(req: SearchRequest, current_user: str = Header(None, alias="Authoriza
     } for r in results]
 
     verse_results = [VerseResult(**r) for r in cleaned]
+    print("DEBUG search:", req.query, "len(results)=", len(results), "info_total=", info.get("total"))
+    
     return {
         "query": req.query,
         "total": info.get("total", len(results)),
