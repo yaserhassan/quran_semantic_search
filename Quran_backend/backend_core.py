@@ -66,7 +66,6 @@ AR_STOP = set([
     "كان","كانت","يكون","يكونون","الذين","التي","الذي","بينهم","فيما","الي"
 ])
 
-
 print("BACKEND_CORE LOADED FROM:", __file__)
 
 # ===================== Load data/index/models =====================
@@ -157,6 +156,18 @@ def faiss_candidate_ids(query_text: str, k_retrieve: int = 1800):
     mask = ids >= 0
     return ids[mask].astype(np.int64), scores[mask].astype(np.float32)
 
+def faiss_neighbors_by_id(ix: int, k: int = 6):
+    """Semantic-A: nearest neighbors using the verse embedding itself."""
+    x = embeddings[int(ix)].astype("float32")
+    if x.ndim == 1:
+        x = x[None, :]
+    # ensure normalized for cosine (index built as cosine)
+    faiss.normalize_L2(x)
+    scores, ids = index.search(x, min(k, index.ntotal))
+    ids = ids[0]
+    scores = scores[0]
+    mask = ids >= 0
+    return ids[mask].astype(np.int64), scores[mask].astype(np.float32)
 
 @torch.no_grad()
 def rerank_bge(query: str, passages: List[str], batch_size=16, max_length=384) -> np.ndarray:
@@ -176,16 +187,6 @@ def build_passage(ix: int) -> str:
     return f"{row[AR_DIAC]} [SEP] {row[EN_COL]}"
 
 # ===================== MAQAS candidates + phrase hits =====================
-def maqas_family_vkeys_ar(base: str) -> set:
-    b = normalize_ar(base)
-    if not b:
-        return set()
-    out = set(inv_ar.get(b, set()))
-    for tok, vset in inv_ar.items():
-        if tok == b or tok.startswith(b) or (b in tok):
-            out |= vset
-    return out
-
 def maqas_candidates_ar(query_ar: str) -> Tuple[set, List[str]]:
     q = normalize_ar(query_ar)
     if not q:
@@ -308,6 +309,65 @@ def mine_expansions_ar(query_ar: str, guaranteed_ids: List[int], top_exp=20) -> 
             break
     return final, anchors
 
+# ===================== Semantic gates (Concept semantic B) =====================
+HELL_AR = {"جهنم","النار","سعير","لظى","سقر","جحيم","عذاب"}
+PARA_AR = {"جنة","جنات","فردوس","نعيم","النعيم","رضوان"}
+
+HELL_EN = {"hell","fire","punishment"}
+PARA_EN = {"paradise","garden","gardens","bliss"}
+
+def polarity_conflict(ix: int, q: str, ar_query: bool) -> bool:
+    """Only used as a light filter for semantic-B candidates."""
+    if ar_query:
+        txt = f" {verse_ar_norm[int(ix)]} "
+        qn = normalize_ar(q)
+        if any(w in qn for w in ("جنة","جنات","فردوس","نعيم")):
+            has_hell = any(f" {w} " in txt or w in txt for w in HELL_AR)
+            has_para = any(f" {w} " in txt or w in txt for w in PARA_AR)
+            return bool(has_hell and not has_para)
+        if any(w in qn for w in ("جهنم","نار","النار","سعير")):
+            has_hell = any(f" {w} " in txt or w in txt for w in HELL_AR)
+            has_para = any(f" {w} " in txt or w in txt for w in PARA_AR)
+            return bool(has_para and not has_hell)
+        return False
+    else:
+        txt = f" {verse_en_norm[int(ix)]} "
+        qn = normalize_en(q)
+        if any(w in qn.split() for w in ("paradise","garden","gardens")):
+            has_hell = any(f" {w} " in txt for w in HELL_EN)
+            has_para = any(f" {w} " in txt for w in PARA_EN)
+            return bool(has_hell and not has_para)
+        if any(w in qn.split() for w in ("hell","fire")):
+            has_hell = any(f" {w} " in txt for w in HELL_EN)
+            has_para = any(f" {w} " in txt for w in PARA_EN)
+            return bool(has_para and not has_hell)
+        return False
+
+def maqas_gate(ix: int, query_toks: List[str], ar_query: bool) -> bool:
+    """
+    Semantic-B gate:
+    Accept only if verse MAQAS tokens intersect query tokens (stems/gloss tokens).
+    """
+    vk = row_to_vkey.get(int(ix))
+    if not vk:
+        return False
+    if ar_query:
+        vtoks = verse_ar_tokens.get(vk, set())
+        if not vtoks:
+            return False
+        qt = set([normalize_ar(t) for t in query_toks if normalize_ar(t)])
+        if not qt:
+            return False
+        return len(vtoks & qt) > 0
+    else:
+        vtoks = verse_en_tokens.get(vk, set())
+        if not vtoks:
+            return False
+        qt = set([normalize_en(t) for t in query_toks if normalize_en(t)])
+        if not qt:
+            return False
+        return len(vtoks & qt) > 0
+
 # ===================== Main Search =====================
 def search_api(query: str,
                k_faiss: int = 1200,
@@ -337,19 +397,17 @@ def search_api(query: str,
     guaranteed_ids = sorted(set(maqas_ids) | set(phrase_ids))
     guaranteed_set = set(guaranteed_ids)
 
-    # (2) expansions (Arabic only)
+    # (2) expansions (Arabic only) — remain ONLY for phrase hits (NOT for embedding query)
     expansions, anchors = [], []
     if ar_query:
         expansions, anchors = mine_expansions_ar(q, guaranteed_ids, top_exp=top_expansions)
 
-    # (3) FAISS candidates pool (we will LIMIT non-guaranteed)
-    embed_q = q
-    if ar_query and expansions:
-        embed_q = normalize_ar(q) + " ; " + " ; ".join(expansions[:8])
-
+    # (3) FAISS concept candidates pool (query only, not query+expansions)
+    embed_q = q  # IMPORTANT: do NOT mix expansions into FAISS query
     faiss_ids, faiss_scores = faiss_candidate_ids(embed_q, k_retrieve=k_faiss)
     id2fs = {int(i): float(s) for i, s in zip(faiss_ids.tolist(), faiss_scores.tolist())}
 
+    # generic semantic pool (limited)
     other_part = [int(ix) for ix in faiss_ids.tolist() if int(ix) not in guaranteed_set]
     other_part.sort(key=lambda x: id2fs.get(int(x), -1e9), reverse=True)
     other_part = other_part[:rerank_limit_non_guaranteed]
@@ -365,18 +423,56 @@ def search_api(query: str,
     if exp_phrase_hits:
         exp_ids = sorted(set([i for lst in exp_phrase_hits.values() for i in lst]))
 
+    # ============================
+    # (4.5) Semantic-A: neighbors of guaranteed verses (local semantic)
+    # Only useful if guaranteed exists; keep it modest to avoid explosion.
+    semA_ids = []
+    if guaranteed_ids:
+        semA_set = set()
+        for gid in guaranteed_ids[:80]:  # cap anchors
+            nbr_ids, nbr_scores = faiss_neighbors_by_id(gid, k=6)
+            for ix in nbr_ids.tolist():
+                ix = int(ix)
+                if ix in guaranteed_set:
+                    continue
+                semA_set.add(ix)
+            if len(semA_set) >= 400:
+                break
+        semA_ids = sorted(semA_set)
+
+    # ============================
+    # (4.6) Semantic-B: concept semantic (limited 20) + MAQAS gate + polarity gate
+    semB_ids = []
+    semB_set = set()
+    if toks:
+        # search bigger pool for better recall, then gate hard
+        b_ids, b_scores = faiss_candidate_ids(q, k_retrieve=min(1800, index.ntotal))
+        for ix in b_ids.tolist():
+            ix = int(ix)
+            if ix in guaranteed_set:
+                continue
+            if ix in semA_set if 'semA_set' in locals() else False:
+                continue
+            if not maqas_gate(ix, toks, ar_query=ar_query):
+                continue
+            if polarity_conflict(ix, q, ar_query=ar_query):
+                continue
+            semB_set.add(ix)
+            if len(semB_set) >= 20:
+                break
+    semB_ids = sorted(semB_set)
+
     # Final candidate pool
-    union_ids = sorted(set(guaranteed_ids) | set(exp_ids) | set(other_part))
+    union_ids = sorted(set(guaranteed_ids) | set(exp_ids) | set(semA_ids) | set(semB_ids) | set(other_part))
     if not union_ids:
         return [], {"error": "no candidates", "total": 0}
 
-    # (5) reranker query
+    # (5) reranker query (same)
     if ar_query:
         rr_query = f"أوجد آيات في القرآن تتعلق بمفهوم: {q}. أعد الآيات المرتبطة معنى وسياقًا."
     else:
         rr_query = f"Find Quran verses that discuss the concept of: {q}. Return verses related by meaning and context."
 
-    # rerank only union_ids (union already limited)
     passages = [build_passage(ix) for ix in union_ids]
     rr_scores = rerank_bge(rr_query, passages, batch_size=rerank_batch, max_length=384)
     rr_map = {int(ix): float(sc) for ix, sc in zip(union_ids, rr_scores)}
@@ -384,15 +480,15 @@ def search_api(query: str,
     # (6) build rows + priority layers
     q_phrase = normalize_ar(q) if ar_query else normalize_en(q)
 
+    semA_set_final = set(semA_ids)
+    semB_set_final = set(semB_ids)
+
     rows = []
     for ix in union_ids:
         row = df_verses.iloc[int(ix)]
         vk = row_to_vkey[int(ix)]
 
-        if ar_query:
-            txt_norm = verse_ar_norm[int(ix)]
-        else:
-            txt_norm = verse_en_norm[int(ix)]
+        txt_norm = verse_ar_norm[int(ix)] if ar_query else verse_en_norm[int(ix)]
 
         # exact word vs exact phrase
         if " " in q_phrase:
@@ -421,11 +517,21 @@ def search_api(query: str,
         elif guaranteed:
             priority = 1
 
+        # semantic layer (only for priority==0)
+        sem_layer = 0
+        if priority == 0:
+            if int(ix) in semA_set_final:
+                sem_layer = 2  # Semantic A (from guaranteed)
+            elif int(ix) in semB_set_final:
+                sem_layer = 1  # Semantic B (concept + gated)
+
         rows.append({
             "ix": int(ix),
             "ref": vk,
             "score_rr": float(rr_map.get(int(ix), -999.0)),
+            "score_faiss": float(id2fs.get(int(ix), -999.0)),
             "priority": int(priority),
+            "sem_layer": int(sem_layer),
             "arabic": str(row[AR_DIAC]),
             "english": str(row[EN_COL]),
         })
@@ -433,27 +539,50 @@ def search_api(query: str,
     df = pd.DataFrame(rows)
     df = df.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
 
-    # ✅ Final filtering (هذا اللي يخلي total منطقي)
+    # ============================
+    # Final filtering (controlled semantic)
+    # ============================
     df_keep = df[df["priority"] > 0].copy()
 
     df_sem = df[df["priority"] == 0].copy()
-    df_sem = df_sem.sort_values("score_rr", ascending=False)
 
-    TOP_SEM = 150
-    RR_MIN = -5.0
-    df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM)
+    # sort semantic: prefer semA then semB then generic
+    df_sem = df_sem.sort_values(["sem_layer", "score_rr"], ascending=[False, False])
 
-    df_final = pd.concat([df_keep, df_sem], ignore_index=True)
-    df_final = df_final.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
+    # caps
+    TOP_SEM_A = 60
+    TOP_SEM_B = 20
+    TOP_SEM_GENERIC = 80
+
+    # thresholds: keep A/B more permissive, generic stricter
+    RR_MIN_A = -2.0
+    RR_MIN_B = -2.0
+    RR_MIN_GENERIC = 0.0
+
+    df_sem_a = df_sem[df_sem["sem_layer"] == 2].copy()
+    df_sem_a = df_sem_a[df_sem_a["score_rr"] >= RR_MIN_A].head(TOP_SEM_A)
+
+    df_sem_b = df_sem[df_sem["sem_layer"] == 1].copy()
+    df_sem_b = df_sem_b[df_sem_b["score_rr"] >= RR_MIN_B].head(TOP_SEM_B)
+
+    df_sem_g = df_sem[df_sem["sem_layer"] == 0].copy()
+    df_sem_g = df_sem_g[df_sem_g["score_rr"] >= RR_MIN_GENERIC].head(TOP_SEM_GENERIC)
+
+    df_sem_final = pd.concat([df_sem_a, df_sem_b, df_sem_g], ignore_index=True)
+
+    df_final = pd.concat([df_keep, df_sem_final], ignore_index=True)
+    df_final = df_final.sort_values(["priority", "sem_layer", "score_rr"], ascending=[False, False, False]).reset_index(drop=True)
 
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
-
     results = df_final[["rank", "ref", "arabic", "english"]].to_dict(orient="records")
 
     info = {
         "query": q,
         "ar_query": bool(ar_query),
         "total": int(len(df_final)),
+        "guaranteed": int(len(df_keep)),
+        "semA": int(len(df_sem_a)),
+        "semB": int(len(df_sem_b)),
+        "semGeneric": int(len(df_sem_g)),
     }
     return results, info
-
