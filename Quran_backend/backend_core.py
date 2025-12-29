@@ -343,9 +343,9 @@ def search_api(query: str,
         expansions, anchors = mine_expansions_ar(q, guaranteed_ids, top_exp=top_expansions)
 
     # (3) FAISS candidates pool (we will LIMIT non-guaranteed)
-    embed_q = q
-    if ar_query and expansions:
-        embed_q = normalize_ar(q) + " ; " + " ; ".join(expansions[:8])
+    # IMPORTANT: do NOT mix expansions into the embedding query.
+    # Expansions are used only for phrase-hit recall/boosting, while FAISS should represent the user's original intent.
+    embed_q = normalize_ar(q) if ar_query else normalize_en(q)
 
     faiss_ids, faiss_scores = faiss_candidate_ids(embed_q, k_retrieve=k_faiss)
     id2fs = {int(i): float(s) for i, s in zip(faiss_ids.tolist(), faiss_scores.tolist())}
@@ -425,6 +425,7 @@ def search_api(query: str,
             "ix": int(ix),
             "ref": vk,
             "score_rr": float(rr_map.get(int(ix), -999.0)),
+            "score_faiss": float(id2fs.get(int(ix), -999.0)),
             "priority": int(priority),
             "arabic": str(row[AR_DIAC]),
             "english": str(row[EN_COL]),
@@ -437,11 +438,21 @@ def search_api(query: str,
     df_keep = df[df["priority"] > 0].copy()
 
     df_sem = df[df["priority"] == 0].copy()
-    df_sem = df_sem.sort_values("score_rr", ascending=False)
 
-    TOP_SEM = 150
-    RR_MIN = -5.0
-    df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM)
+    # Semantic-only admission gate (keeps guaranteed recall untouched).
+    # 1) FAISS floor blocks weak semantic drift (e.g., جنة -> جهنم) that the reranker may still score as "related".
+    # 2) Reranker floor prevents very loose "relatedness" matches from dominating the tail.
+    # Thresholds are intentionally conservative; tune per-language if needed.
+    TOP_SEM = 60
+    RR_MIN = 0.0
+    FAISS_MIN_AR = 0.28
+    FAISS_MIN_EN = 0.24
+    faiss_min = FAISS_MIN_AR if ar_query else FAISS_MIN_EN
+
+    df_sem = df_sem[
+        (df_sem["score_faiss"] >= faiss_min) &
+        (df_sem["score_rr"] >= RR_MIN)
+    ].sort_values(["score_rr", "score_faiss"], ascending=[False, False]).head(TOP_SEM)
 
     df_final = pd.concat([df_keep, df_sem], ignore_index=True)
     df_final = df_final.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
