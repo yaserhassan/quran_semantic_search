@@ -67,7 +67,10 @@ AR_STOP = set([
     "كان","كانت","يكون","يكونون","الذين","التي","الذي","بينهم","فيما","الي"
 ])
 
-print("BACKEND_CORE LOADED FROM:", __file__)
+try:
+    print("BACKEND_CORE LOADED FROM:", __file__)
+except Exception:
+    print("BACKEND_CORE LOADED ✅")
 
 # ===================== Device =====================
 _device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -89,8 +92,8 @@ verse_ar_norm = df_verses[AR_NOD].astype(str).map(normalize_ar).tolist()
 verse_en_norm = df_verses[EN_COL].astype(str).map(normalize_en).tolist()
 
 # vkey maps
-vkey_to_row = {}
-row_to_vkey = {}
+vkey_to_row: Dict[str, int] = {}
+row_to_vkey: Dict[int, str] = {}
 for i, r in df_verses.iterrows():
     vk = vkey(r[SURA_COL], r[AYAH_COL])
     vkey_to_row[vk] = int(i)
@@ -100,10 +103,18 @@ for i, r in df_verses.iterrows():
 print("Building MAQAS indices...")
 df_m = df_maqas.copy()
 df_m["__morph"] = df_m[M_TYPE_COL].astype(str).str.lower()
-df_m["__stem"]  = df_m[M_NODIAC_COL].astype(str).map(normalize_ar)
+
+# ✅ stem الحقيقي من Segmented_Word في صفوف Stem
+df_m["__stem"] = ""
+mask_stem = df_m["__morph"].str.fullmatch("stem", na=False)
+
+df_m.loc[mask_stem, "__stem"] = df_m.loc[mask_stem, "Segmented_Word"].astype(str).map(normalize_ar)
+
+# gloss كما هو
 df_m["__gloss"] = df_m[M_GLOSS_COL].astype(str).map(normalize_en)
 
-df_stem = df_m[df_m["__morph"].str.contains("stem", na=False)].copy()
+df_stem = df_m[mask_stem].copy()
+
 
 verse_ar_tokens: Dict[str, set] = {}
 verse_en_tokens: Dict[str, set] = {}
@@ -113,16 +124,14 @@ for _, r in df_stem.iterrows():
     tok_ar = r["__stem"]
     tok_en = r["__gloss"]
 
-    verse_ar_tokens.setdefault(vk, set())
-    verse_en_tokens.setdefault(vk, set())
-
     if tok_ar:
-        verse_ar_tokens[vk].add(tok_ar)
+        verse_ar_tokens.setdefault(vk, set()).add(tok_ar)
 
     if tok_en:
+        s = verse_en_tokens.setdefault(vk, set())
         for w in tok_en.split():
             if len(w) >= 4:
-                verse_en_tokens[vk].add(w)
+                s.add(w)
 
 inv_ar: Dict[str, set] = {}
 inv_en: Dict[str, set] = {}
@@ -148,14 +157,21 @@ mdl_rr.eval()
 print("Ready ✅ on device:", _device)
 
 # ===================== Local LLM Judge (semantic ONLY) =====================
-# ملاحظة: LLM هنا "حكم" على النتائج semantic فقط. لا يدخل في lexical نهائياً.
-USE_LLM_SEM_JUDGE = os.getenv("USE_LLM_SEM_JUDGE", "1") == "1"
+USE_LLM_SEM_JUDGE = (os.getenv("LLM_FILTER_ENABLED") or os.getenv("USE_LLM_SEM_JUDGE") or "1") == "1"
 
-# مناسب لـ T4 16GB (4bit)
-LLM_NAME = os.getenv("LLM_NAME", "Qwen/Qwen2.5-1.5B-Instruct")  # قوي عربي/إنجليزي
-LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "60"))  # كم آية نفحصها بالـ LLM
-LLM_CONF_MIN = float(os.getenv("LLM_CONF_MIN", "0.60"))  # حد الثقة للقبول
-LLM_KEEP_MAYBE = os.getenv("LLM_KEEP_MAYBE", "0") == "1"  # لو تبين maybe يدخل
+LLM_NAME = (
+    os.getenv("LLM_MODEL_NAME")
+    or os.getenv("LLM_NAME")
+    or "Qwen/Qwen2.5-1.5B-Instruct"
+)
+
+LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "12"))
+LLM_MAX_NEW_TOKENS = int(os.getenv("LLM_MAX_NEW_TOKENS", "64"))
+LLM_TEXT_TRIM = int(os.getenv("LLM_TEXT_TRIM", "280"))
+
+LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "60"))
+LLM_CONF_MIN = float(os.getenv("LLM_CONF_MIN", "0.60"))
+LLM_KEEP_MAYBE = os.getenv("LLM_KEEP_MAYBE", "0") == "1"
 
 _llm_tokenizer = None
 _llm_model = None
@@ -163,15 +179,14 @@ _llm_cache: Dict[str, Dict[str, Any]] = {}  # cache per (query|ref|arabic|englis
 
 def _load_llm_if_needed():
     global _llm_tokenizer, _llm_model
-    if _llm_model is not None and _llm_tokenizer is not None:
-        return
     if not USE_LLM_SEM_JUDGE:
+        return
+    if _llm_model is not None and _llm_tokenizer is not None:
         return
 
     print(f"Loading local LLM judge: {LLM_NAME} (4bit) ...")
     _llm_tokenizer = AutoTokenizer.from_pretrained(LLM_NAME, use_fast=True)
 
-    # 4-bit quantization (bitsandbytes)
     _llm_model = AutoModelForCausalLM.from_pretrained(
         LLM_NAME,
         device_map="auto",
@@ -183,17 +198,12 @@ def _load_llm_if_needed():
     print("LLM judge ready ✅")
 
 def _safe_json_extract(text: str) -> Any:
-    """
-    يحاول يلقط JSON من الرد حتى لو فيه كلام حوله.
-    """
-    text = text.strip()
-    # أول محاولة: لو النص نفسه JSON
+    text = (text or "").strip()
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    # محاولة استخراج أول كتلة JSON
     m = re.search(r"(\{.*\}|\[.*\])", text, flags=re.DOTALL)
     if not m:
         return None
@@ -203,23 +213,20 @@ def _safe_json_extract(text: str) -> Any:
     except Exception:
         return None
 
-def _build_llm_prompt(query: str, items: List[Dict[str, str]]) -> str:
-    """
-    Prompt صارم: يمنع model يسوي expansions/lexical. فقط relevance.
-    outputs: JSON array of objects.
-    """
-    # نختصر النصوص شوي عشان التوكنز
-    def cut(s, n):
-        s = "" if s is None else str(s)
-        s = s.strip()
-        return s[:n]
+def _cut(s: str, n: int) -> str:
+    s = "" if s is None else str(s).strip()
+    return s[:n]
 
+def _build_llm_prompt_batch(query: str, items: List[Dict[str, str]]) -> str:
+    """
+    Strict batch judge: returns JSON array only.
+    """
     lines = []
     for it in items:
         lines.append({
             "ref": it["ref"],
-            "arabic": cut(it["arabic"], 260),
-            "english": cut(it["english"], 260)
+            "arabic": _cut(it.get("arabic",""), LLM_TEXT_TRIM),
+            "english": _cut(it.get("english",""), LLM_TEXT_TRIM)
         })
 
     payload = json.dumps(lines, ensure_ascii=False)
@@ -232,6 +239,7 @@ RULES (must follow):
 - DO NOT generate synonyms or lexical expansions.
 - ONLY decide whether each verse is relevant to the query concept by meaning/context.
 - Output MUST be valid JSON ONLY. No extra text.
+- Return ONLY JSON, no explanation.
 
 Query: {query}
 
@@ -249,10 +257,6 @@ Return JSON array of same length, each object:
 
 @torch.inference_mode()
 def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """
-    sem_rows: list of dicts contains ref, arabic, english
-    return map ref -> {label, confidence, theme}
-    """
     if not USE_LLM_SEM_JUDGE:
         return {}
 
@@ -260,7 +264,6 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
     if _llm_model is None:
         return {}
 
-    # caching
     out: Dict[str, Dict[str, Any]] = {}
     todo = []
     for r in sem_rows:
@@ -273,15 +276,13 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
     if not todo:
         return out
 
-    # batch them into small chunks to avoid long context
-    CHUNK = 12  # آمن على T4
+    CHUNK = max(1, LLM_BATCH_SIZE)
     for i in range(0, len(todo), CHUNK):
         chunk = todo[i:i+CHUNK]
         items = [{"ref": r["ref"], "arabic": r.get("arabic",""), "english": r.get("english","")} for _, r in chunk]
-        prompt = _build_llm_prompt(query, items)
+        prompt = _build_llm_prompt_batch(query, items)
 
         messages = [{"role":"user","content":prompt}]
-        # Qwen instruct uses chat template
         if hasattr(_llm_tokenizer, "apply_chat_template"):
             text = _llm_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = _llm_tokenizer(text, return_tensors="pt").to(_llm_model.device)
@@ -290,7 +291,7 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
 
         gen = _llm_model.generate(
             **inputs,
-            max_new_tokens=420,
+            max_new_tokens=LLM_MAX_NEW_TOKENS,
             do_sample=False,
             temperature=0.0,
             top_p=1.0,
@@ -298,22 +299,16 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
             eos_token_id=_llm_tokenizer.eos_token_id
         )
 
-        # ✅ خذي "الجزء المولّد فقط" بدون prompt
         in_len = inputs["input_ids"].shape[1]
         new_tokens = gen[0][in_len:]
         decoded = _llm_tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
         parsed = _safe_json_extract(decoded)
-
-
-
-
         if not isinstance(parsed, list):
-            # fallback: اعتبر الكل maybe بثقة منخفضة (عشان ما نخرب)
             parsed = [{"ref": it["ref"], "label": "maybe", "confidence": 0.45, "theme": "other"} for it in items]
 
-        # build map
         pred_map = {str(x.get("ref","")): x for x in parsed if isinstance(x, dict)}
+
         for key, r in chunk:
             ref = r["ref"]
             x = pred_map.get(ref, {"ref":ref, "label":"maybe", "confidence":0.45, "theme":"other"})
@@ -411,7 +406,6 @@ def exact_word_hits_en(word_en: str) -> List[int]:
     return [i for i, txt in enumerate(verse_en_norm) if needle in f" {txt} "]
 
 # ===================== Expansion mining (Arabic) =====================
-# (كما هو - LLM ممنوع يدخل هنا)
 def pick_anchor_tokens_ar(query_ar: str, max_tokens=2) -> List[str]:
     toks = [t for t in normalize_ar(query_ar).split() if t and t not in AR_STOP and len(t) >= 3]
     if not toks:
@@ -435,10 +429,6 @@ def extract_ngrams_containing_anchor(text: str, anchors: List[str], n_min=2, n_m
             content = [t for t in ng if (t not in AR_STOP and len(t) >= 3)]
             if len(content) < 2:
                 continue
-            if "يوم" in anchors and "يوم" in ng:
-                j = ng.index("يوم")
-                if j+1 < len(ng) and ng[j+1] in AR_STOP:
-                    continue
             out.append(" ".join(ng))
     return out
 
@@ -492,7 +482,7 @@ def search_api(query: str,
 
     ar_query = is_arabic(q)
 
-    # (1) guaranteed set (exact word/phrase + MAQAS hits) => LEXICAL (لا تدخل LLM)
+    # (1) guaranteed set (exact word/phrase + MAQAS hits) => lexical only
     if ar_query:
         maqas_vkeys, toks = maqas_candidates_ar(q)
         qn = normalize_ar(q)
@@ -503,13 +493,11 @@ def search_api(query: str,
         phrase_ids = exact_phrase_hits_en(q) if " " in qn else exact_word_hits_en(q)
 
     maqas_ids = [vkey_to_row[vk] for vk in maqas_vkeys if vk in vkey_to_row]
-    maqas_ids = sorted(set(maqas_ids))
-
     guaranteed_ids = sorted(set(maqas_ids) | set(phrase_ids))
     guaranteed_set = set(guaranteed_ids)
 
-    # (2) expansions (Arabic only) - برضه lexical/pseudo-lexical (LLM لا يدخل)
-    expansions, anchors = [], []
+    # (2) expansions (Arabic only) - lexical mining
+    expansions = []
     if ar_query:
         expansions, anchors = mine_expansions_ar(q, guaranteed_ids, top_exp=top_expansions)
 
@@ -526,17 +514,14 @@ def search_api(query: str,
     other_part = other_part[:rerank_limit_non_guaranteed]
 
     # (4) expansion phrase hits
-    exp_ids = []
     exp_phrase_hits = {}
     if ar_query and expansions:
         for ph in expansions[:top_expansions]:
             hits = exact_phrase_hits_ar(ph)
             if hits:
                 exp_phrase_hits[ph] = hits
-    if exp_phrase_hits:
-        exp_ids = sorted(set([i for lst in exp_phrase_hits.values() for i in lst]))
+    exp_ids = sorted(set([i for lst in exp_phrase_hits.values() for i in lst])) if exp_phrase_hits else []
 
-    # Final candidate pool
     union_ids = sorted(set(guaranteed_ids) | set(exp_ids) | set(other_part))
     if not union_ids:
         return [], {"error": "no candidates", "total": 0}
@@ -553,19 +538,18 @@ def search_api(query: str,
 
     # (6) build rows + priority layers
     q_phrase = normalize_ar(q) if ar_query else normalize_en(q)
-
     rows = []
+
     for ix in union_ids:
         row = df_verses.iloc[int(ix)]
         vk = row_to_vkey[int(ix)]
-
         txt_norm = verse_ar_norm[int(ix)] if ar_query else verse_en_norm[int(ix)]
 
-        # exact word vs exact phrase
+        # exact phrase/word
         if " " in q_phrase:
-            is_exact_phrase = int(q_phrase in txt_norm)
+            is_exact = int(q_phrase in txt_norm)
         else:
-            is_exact_phrase = int(f" {q_phrase} " in f" {txt_norm} ")
+            is_exact = int(f" {q_phrase} " in f" {txt_norm} ")
 
         matched_exp = ""
         is_expansion_hit = 0
@@ -580,13 +564,14 @@ def search_api(query: str,
         guaranteed = 1 if int(ix) in guaranteed_set else 0
 
         # priority: 3 exact, 2 expansion, 1 guaranteed, 0 semantic
-        priority = 0
-        if is_exact_phrase:
+        if is_exact:
             priority = 3
         elif is_expansion_hit:
             priority = 2
         elif guaranteed:
             priority = 1
+        else:
+            priority = 0
 
         bucket = "lexical" if priority > 0 else "semantic"
 
@@ -604,26 +589,28 @@ def search_api(query: str,
     df = pd.DataFrame(rows)
     df = df.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
 
-    # ✅ (A) LEXICAL KEEP (NO LLM)
     df_keep = df[df["priority"] > 0].copy()
 
-    # ✅ (B) SEMANTIC candidates
-    df_sem = df[df["priority"] == 0].copy()
-    df_sem = df_sem.sort_values("score_rr", ascending=False)
+    df_sem = df[df["priority"] == 0].copy().sort_values("score_rr", ascending=False)
 
-    # بدل TOP_SEM/RR_MIN الثابتة => نستخدم LLM (semantic only)
+    # semantic pool before LLM
+    RR_MIN = -5.0
+    TOP_SEM_TOTAL = 150
+    df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM_TOTAL)
+
     sem_candidates = df_sem.head(max(LLM_MAX_INPUT_VERSES, 1)).to_dict(orient="records")
 
     sem_keep_refs = set()
     sem_meta = {}
 
     if USE_LLM_SEM_JUDGE and len(sem_candidates) > 0:
-        preds = llm_judge_semantic(q, sem_candidates)  # map ref -> {label, confidence, theme}
+        preds = llm_judge_semantic(q, sem_candidates)
         for r in sem_candidates:
             ref = r["ref"]
-            p = preds.get(ref, None)
+            p = preds.get(ref)
             if not p:
                 continue
+
             lab = p.get("label", "maybe")
             conf = float(p.get("confidence", 0.45))
             theme = p.get("theme", "other")
@@ -638,17 +625,10 @@ def search_api(query: str,
                 sem_keep_refs.add(ref)
                 sem_meta[ref] = {"llm_label": lab, "llm_conf": conf, "llm_theme": theme}
 
-    # fallback بسيط لو LLM مقفل/فشل: احتفظ بأفضل كم آية حسب reranker
     if not USE_LLM_SEM_JUDGE:
-        # نفس منطقك القديم لكن بدون رقم ثابت كبير
-        RR_MIN = -5.0
-        TOP_SEM = 150
-        df_sem_keep = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM).copy()
+        df_sem_keep = df_sem.copy()
     else:
-        # فلترة حسب LLM
         if len(sem_keep_refs) == 0:
-            # لو LLM رفض كل شيء (نادر)، نعطي قليل جداً كاحتياط (اختياري)
-            # ممكن تخليه 0 لو تبين strict 100%
             df_sem_keep = df_sem.head(10).copy()
             df_sem_keep["llm_label"] = "fallback"
             df_sem_keep["llm_conf"] = 0.40
@@ -658,20 +638,15 @@ def search_api(query: str,
             df_sem_keep["llm_label"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_label", ""))
             df_sem_keep["llm_conf"]  = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_conf", 0.0))
             df_sem_keep["llm_theme"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_theme", ""))
-
-            # نرتب semantic: أولاً ثقة LLM ثم rr_score
             df_sem_keep = df_sem_keep.sort_values(["llm_conf", "score_rr"], ascending=[False, False])
 
-    # ✅ Final merge
     df_final = pd.concat([df_keep, df_sem_keep], ignore_index=True)
     df_final = df_final.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
 
-    # output (تقدرين تضيفين llm columns لو تبين في الـ API)
     keep_cols = ["rank", "ref", "bucket", "arabic", "english"]
     if USE_LLM_SEM_JUDGE:
         keep_cols += ["llm_label", "llm_conf", "llm_theme"]
-
 
     results = df_final[keep_cols].to_dict(orient="records")
 
