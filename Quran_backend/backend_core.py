@@ -152,7 +152,7 @@ print("Ready ✅ on device:", _device)
 USE_LLM_SEM_JUDGE = os.getenv("USE_LLM_SEM_JUDGE", "1") == "1"
 
 # مناسب لـ T4 16GB (4bit)
-LLM_NAME = os.getenv("LLM_NAME", "Qwen/Qwen2.5-7B-Instruct")  # قوي عربي/إنجليزي
+LLM_NAME = os.getenv("LLM_NAME", "Qwen/Qwen2.5-1.5B-Instruct")  # قوي عربي/إنجليزي
 LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "60"))  # كم آية نفحصها بالـ LLM
 LLM_CONF_MIN = float(os.getenv("LLM_CONF_MIN", "0.60"))  # حد الثقة للقبول
 LLM_KEEP_MAYBE = os.getenv("LLM_KEEP_MAYBE", "0") == "1"  # لو تبين maybe يدخل
@@ -298,10 +298,15 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
             eos_token_id=_llm_tokenizer.eos_token_id
         )
 
-        decoded = _llm_tokenizer.decode(gen[0], skip_special_tokens=True)
+        # ✅ خذي "الجزء المولّد فقط" بدون prompt
+        in_len = inputs["input_ids"].shape[1]
+        new_tokens = gen[0][in_len:]
+        decoded = _llm_tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
-        # بعض templates يرجع prompt مع output، فنحاول نلقط JSON
         parsed = _safe_json_extract(decoded)
+
+
+
 
         if not isinstance(parsed, list):
             # fallback: اعتبر الكل maybe بثقة منخفضة (عشان ما نخرب)
@@ -665,9 +670,8 @@ def search_api(query: str,
     # output (تقدرين تضيفين llm columns لو تبين في الـ API)
     keep_cols = ["rank", "ref", "bucket", "arabic", "english"]
     if USE_LLM_SEM_JUDGE:
-        # اختياري لإظهار سبب قبول semantic
-        if "llm_label" in df_final.columns:
-            keep_cols += ["llm_label", "llm_conf", "llm_theme"]
+        keep_cols += ["llm_label", "llm_conf", "llm_theme"]
+
 
     results = df_final[keep_cols].to_dict(orient="records")
 
