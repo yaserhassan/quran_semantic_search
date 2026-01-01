@@ -95,6 +95,7 @@ class LoginResponse(BaseModel):
 class VerseResult(BaseModel):
     rank: int
     ref: str
+    bucket: str
     arabic: str
     english: str
 
@@ -221,6 +222,7 @@ def search(req: SearchRequest, current_user: str = Header(None, alias="Authoriza
     cleaned = [{
         "rank": r["rank"],
         "ref": r["ref"],
+        "bucket": r.get("bucket", "semantic"),
         "arabic": r["arabic"],
         "english": r["english"],
     } for r in results]

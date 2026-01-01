@@ -143,3 +143,17 @@
   cursor: default;
 }
 
+.section-title{
+  margin: 14px 0 8px;
+  font-weight: 700;
+}
+
+.badge{
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  margin-left: 10px;
+}
+
+.badge-lex{ background:#e3f2fd; color:#1565c0; }
+.badge-sem{ background:#f3e5f5; color:#6a1b9a; }

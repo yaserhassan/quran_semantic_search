@@ -14,7 +14,6 @@ function Dashboard({ token, onLogout }) {
     return Math.max(1, Math.ceil(results.length / RESULTS_PER_PAGE));
   }, [results.length]);
 
-  // لو النتائج تغيرت وصارت الصفحات أقل، نزّل currentPage تلقائياً
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages);
   }, [results.length, totalPages, currentPage]);
@@ -49,14 +48,9 @@ function Dashboard({ token, onLogout }) {
     }
   };
 
-  const goToPage = (p) => {
-    const page = Math.min(Math.max(1, p), totalPages);
-    setCurrentPage(page);
-  };
-
-  const start = (currentPage - 1) * RESULTS_PER_PAGE;
-  const end = start + RESULTS_PER_PAGE;
-  const pageResults = results.slice(start, end);
+  // تقسيم النتائج إلى قسمين
+  const lexicalResults = results.filter(r => r.bucket === "lexical");
+  const semanticResults = results.filter(r => r.bucket === "semantic");
 
   return (
     <div className="page-bg">
@@ -109,48 +103,42 @@ function Dashboard({ token, onLogout }) {
           )}
 
           <div className="results-list">
-            {pageResults.map((r) => (
-              <div key={`${r.ref}-${r.rank}`} className="result-card">
-                <div className="result-meta">
-                  <span>
-                    Rank {r.rank} • Ref {r.ref}
-                  </span>
-                </div>
-                <p className="arabic-verse">{r.arabic}</p>
-                <p className="english-verse">{r.english}</p>
-              </div>
-            ))}
+
+            {/* قسم Lexical */}
+            {lexicalResults.length > 0 && (
+              <>
+                <div className="section-title">🔎 Lexical Matching Layer</div>
+                {lexicalResults.map((r) => (
+                  <div key={`${r.ref}-${r.rank}`} className="result-card">
+                    <div className="result-meta">
+                      <span>Rank {r.rank} • Ref {r.ref}</span>
+                      <span className="badge badge-lex">Lexical</span>
+                    </div>
+                    <p className="arabic-verse">{r.arabic}</p>
+                    <p className="english-verse">{r.english}</p>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {/* قسم Semantic */}
+            {semanticResults.length > 0 && (
+              <>
+                <div className="section-title">🧠 Semantic Retrieval Layer</div>
+                {semanticResults.map((r) => (
+                  <div key={`${r.ref}-${r.rank}`} className="result-card">
+                    <div className="result-meta">
+                      <span>Rank {r.rank} • Ref {r.ref}</span>
+                      <span className="badge badge-sem">Semantic</span>
+                    </div>
+                    <p className="arabic-verse">{r.arabic}</p>
+                    <p className="english-verse">{r.english}</p>
+                  </div>
+                ))}
+              </>
+            )}
+
           </div>
-
-          {results.length > 0 && (
-            <div className="pagination-row">
-              <span>
-                Page {currentPage} of {totalPages}
-              </span>
-
-              {totalPages > 1 && (
-                <div className="pagination-buttons">
-                  <button
-                    type="button"
-                    onClick={() => goToPage(currentPage - 1)}
-                    disabled={currentPage === 1 || loading}
-                    className="pagination-btn"
-                  >
-                    Previous
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => goToPage(currentPage + 1)}
-                    disabled={currentPage === totalPages || loading}
-                    className="pagination-btn"
-                  >
-                    Next
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </div>

@@ -420,12 +420,15 @@ def search_api(query: str,
             priority = 2
         elif guaranteed:
             priority = 1
+        
+        bucket = "lexical" if priority > 0 else "semantic"
 
         rows.append({
             "ix": int(ix),
             "ref": vk,
             "score_rr": float(rr_map.get(int(ix), -999.0)),
             "priority": int(priority),
+            "bucket": bucket,
             "arabic": str(row[AR_DIAC]),
             "english": str(row[EN_COL]),
         })
@@ -448,7 +451,7 @@ def search_api(query: str,
 
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
 
-    results = df_final[["rank", "ref", "arabic", "english"]].to_dict(orient="records")
+    results = df_final[["rank", "ref", "bucket" , "arabic", "english"]].to_dict(orient="records")
 
     info = {
         "query": q,
