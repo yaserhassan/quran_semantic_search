@@ -13,3 +13,7 @@ google-auth
 google-auth-oauthlib
 python-dotenv
 bcrypt==4.0.1
+transformers 
+accelerate 
+bitsandbytes 
+sentencepiece

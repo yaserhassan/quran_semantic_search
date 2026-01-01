@@ -1,6 +1,7 @@
 # backend_core.py
 import os
 import re
+import json
 from typing import List, Dict, Tuple, Any
 
 import numpy as np
@@ -8,7 +9,7 @@ import pandas as pd
 import faiss
 import torch
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 
 pd.set_option("display.max_colwidth", 200)
 
@@ -66,12 +67,12 @@ AR_STOP = set([
     "كان","كانت","يكون","يكونون","الذين","التي","الذي","بينهم","فيما","الي"
 ])
 
-
 print("BACKEND_CORE LOADED FROM:", __file__)
 
-# ===================== Load data/index/models =====================
+# ===================== Device =====================
 _device = "cuda" if torch.cuda.is_available() else "cpu"
 
+# ===================== Load data/index/models =====================
 print("Loading data...")
 df_verses = pd.read_excel(QURAN_PATH)
 df_maqas  = pd.read_excel(MAQAS_PATH)
@@ -95,7 +96,7 @@ for i, r in df_verses.iterrows():
     vkey_to_row[vk] = int(i)
     row_to_vkey[int(i)] = vk
 
-# Build MAQAS inverted index (stems + gloss tokens)
+# ===================== Build MAQAS inverted index =====================
 print("Building MAQAS indices...")
 df_m = df_maqas.copy()
 df_m["__morph"] = df_m[M_TYPE_COL].astype(str).str.lower()
@@ -136,7 +137,7 @@ for vk, toks in verse_en_tokens.items():
 
 print("Arabic stem vocab:", len(inv_ar), "| English gloss vocab:", len(inv_en))
 
-# Models
+# ===================== Embedder + Reranker =====================
 print("Loading embedder + reranker...")
 embedder = SentenceTransformer("BAAI/bge-m3", device=_device)
 
@@ -145,6 +146,181 @@ tok_rr = AutoTokenizer.from_pretrained(reranker_name)
 mdl_rr = AutoModelForSequenceClassification.from_pretrained(reranker_name).to(_device)
 mdl_rr.eval()
 print("Ready ✅ on device:", _device)
+
+# ===================== Local LLM Judge (semantic ONLY) =====================
+# ملاحظة: LLM هنا "حكم" على النتائج semantic فقط. لا يدخل في lexical نهائياً.
+USE_LLM_SEM_JUDGE = os.getenv("USE_LLM_SEM_JUDGE", "1") == "1"
+
+# مناسب لـ T4 16GB (4bit)
+LLM_NAME = os.getenv("LLM_NAME", "Qwen/Qwen2.5-7B-Instruct")  # قوي عربي/إنجليزي
+LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "60"))  # كم آية نفحصها بالـ LLM
+LLM_CONF_MIN = float(os.getenv("LLM_CONF_MIN", "0.60"))  # حد الثقة للقبول
+LLM_KEEP_MAYBE = os.getenv("LLM_KEEP_MAYBE", "0") == "1"  # لو تبين maybe يدخل
+
+_llm_tokenizer = None
+_llm_model = None
+_llm_cache: Dict[str, Dict[str, Any]] = {}  # cache per (query|ref|arabic|english)
+
+def _load_llm_if_needed():
+    global _llm_tokenizer, _llm_model
+    if _llm_model is not None and _llm_tokenizer is not None:
+        return
+    if not USE_LLM_SEM_JUDGE:
+        return
+
+    print(f"Loading local LLM judge: {LLM_NAME} (4bit) ...")
+    _llm_tokenizer = AutoTokenizer.from_pretrained(LLM_NAME, use_fast=True)
+
+    # 4-bit quantization (bitsandbytes)
+    _llm_model = AutoModelForCausalLM.from_pretrained(
+        LLM_NAME,
+        device_map="auto",
+        torch_dtype=torch.float16,
+        load_in_4bit=True,
+        low_cpu_mem_usage=True
+    )
+    _llm_model.eval()
+    print("LLM judge ready ✅")
+
+def _safe_json_extract(text: str) -> Any:
+    """
+    يحاول يلقط JSON من الرد حتى لو فيه كلام حوله.
+    """
+    text = text.strip()
+    # أول محاولة: لو النص نفسه JSON
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # محاولة استخراج أول كتلة JSON
+    m = re.search(r"(\{.*\}|\[.*\])", text, flags=re.DOTALL)
+    if not m:
+        return None
+    chunk = m.group(1).strip()
+    try:
+        return json.loads(chunk)
+    except Exception:
+        return None
+
+def _build_llm_prompt(query: str, items: List[Dict[str, str]]) -> str:
+    """
+    Prompt صارم: يمنع model يسوي expansions/lexical. فقط relevance.
+    outputs: JSON array of objects.
+    """
+    # نختصر النصوص شوي عشان التوكنز
+    def cut(s, n):
+        s = "" if s is None else str(s)
+        s = s.strip()
+        return s[:n]
+
+    lines = []
+    for it in items:
+        lines.append({
+            "ref": it["ref"],
+            "arabic": cut(it["arabic"], 260),
+            "english": cut(it["english"], 260)
+        })
+
+    payload = json.dumps(lines, ensure_ascii=False)
+
+    return f"""
+You are a strict relevance judge for Quran verse retrieval.
+
+RULES (must follow):
+- DO NOT rewrite, paraphrase, expand, or change the query.
+- DO NOT generate synonyms or lexical expansions.
+- ONLY decide whether each verse is relevant to the query concept by meaning/context.
+- Output MUST be valid JSON ONLY. No extra text.
+
+Query: {query}
+
+Decide for each item:
+label: one of ["relevant","not_relevant","maybe"]
+confidence: number from 0.0 to 1.0
+theme: short tag like ["qiyamah","akhirah","hisab","general_reminder","dua","warning","law","story","other"]
+
+INPUT_ITEMS_JSON:
+{payload}
+
+Return JSON array of same length, each object:
+{{"ref":"<ref>","label":"...","confidence":0.0,"theme":"..."}}
+""".strip()
+
+@torch.inference_mode()
+def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    sem_rows: list of dicts contains ref, arabic, english
+    return map ref -> {label, confidence, theme}
+    """
+    if not USE_LLM_SEM_JUDGE:
+        return {}
+
+    _load_llm_if_needed()
+    if _llm_model is None:
+        return {}
+
+    # caching
+    out: Dict[str, Dict[str, Any]] = {}
+    todo = []
+    for r in sem_rows:
+        key = f"{query}||{r['ref']}||{r.get('arabic','')}||{r.get('english','')}"
+        if key in _llm_cache:
+            out[r["ref"]] = _llm_cache[key]
+        else:
+            todo.append((key, r))
+
+    if not todo:
+        return out
+
+    # batch them into small chunks to avoid long context
+    CHUNK = 12  # آمن على T4
+    for i in range(0, len(todo), CHUNK):
+        chunk = todo[i:i+CHUNK]
+        items = [{"ref": r["ref"], "arabic": r.get("arabic",""), "english": r.get("english","")} for _, r in chunk]
+        prompt = _build_llm_prompt(query, items)
+
+        messages = [{"role":"user","content":prompt}]
+        # Qwen instruct uses chat template
+        if hasattr(_llm_tokenizer, "apply_chat_template"):
+            text = _llm_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = _llm_tokenizer(text, return_tensors="pt").to(_llm_model.device)
+        else:
+            inputs = _llm_tokenizer(prompt, return_tensors="pt", truncation=True).to(_llm_model.device)
+
+        gen = _llm_model.generate(
+            **inputs,
+            max_new_tokens=420,
+            do_sample=False,
+            temperature=0.0,
+            top_p=1.0,
+            repetition_penalty=1.0,
+            eos_token_id=_llm_tokenizer.eos_token_id
+        )
+
+        decoded = _llm_tokenizer.decode(gen[0], skip_special_tokens=True)
+
+        # بعض templates يرجع prompt مع output، فنحاول نلقط JSON
+        parsed = _safe_json_extract(decoded)
+
+        if not isinstance(parsed, list):
+            # fallback: اعتبر الكل maybe بثقة منخفضة (عشان ما نخرب)
+            parsed = [{"ref": it["ref"], "label": "maybe", "confidence": 0.45, "theme": "other"} for it in items]
+
+        # build map
+        pred_map = {str(x.get("ref","")): x for x in parsed if isinstance(x, dict)}
+        for key, r in chunk:
+            ref = r["ref"]
+            x = pred_map.get(ref, {"ref":ref, "label":"maybe", "confidence":0.45, "theme":"other"})
+            rec = {
+                "label": str(x.get("label","maybe")),
+                "confidence": float(x.get("confidence", 0.45)),
+                "theme": str(x.get("theme","other"))
+            }
+            _llm_cache[key] = rec
+            out[ref] = rec
+
+    return out
 
 # ===================== Core helpers =====================
 def faiss_candidate_ids(query_text: str, k_retrieve: int = 1800):
@@ -156,7 +332,6 @@ def faiss_candidate_ids(query_text: str, k_retrieve: int = 1800):
     scores = scores[0]
     mask = ids >= 0
     return ids[mask].astype(np.int64), scores[mask].astype(np.float32)
-
 
 @torch.no_grad()
 def rerank_bge(query: str, passages: List[str], batch_size=16, max_length=384) -> np.ndarray:
@@ -176,16 +351,6 @@ def build_passage(ix: int) -> str:
     return f"{row[AR_DIAC]} [SEP] {row[EN_COL]}"
 
 # ===================== MAQAS candidates + phrase hits =====================
-def maqas_family_vkeys_ar(base: str) -> set:
-    b = normalize_ar(base)
-    if not b:
-        return set()
-    out = set(inv_ar.get(b, set()))
-    for tok, vset in inv_ar.items():
-        if tok == b or tok.startswith(b) or (b in tok):
-            out |= vset
-    return out
-
 def maqas_candidates_ar(query_ar: str) -> Tuple[set, List[str]]:
     q = normalize_ar(query_ar)
     if not q:
@@ -241,6 +406,7 @@ def exact_word_hits_en(word_en: str) -> List[int]:
     return [i for i, txt in enumerate(verse_en_norm) if needle in f" {txt} "]
 
 # ===================== Expansion mining (Arabic) =====================
+# (كما هو - LLM ممنوع يدخل هنا)
 def pick_anchor_tokens_ar(query_ar: str, max_tokens=2) -> List[str]:
     toks = [t for t in normalize_ar(query_ar).split() if t and t not in AR_STOP and len(t) >= 3]
     if not toks:
@@ -321,7 +487,7 @@ def search_api(query: str,
 
     ar_query = is_arabic(q)
 
-    # (1) guaranteed set (exact word or exact phrase) + MAQAS exact tokens
+    # (1) guaranteed set (exact word/phrase + MAQAS hits) => LEXICAL (لا تدخل LLM)
     if ar_query:
         maqas_vkeys, toks = maqas_candidates_ar(q)
         qn = normalize_ar(q)
@@ -337,12 +503,12 @@ def search_api(query: str,
     guaranteed_ids = sorted(set(maqas_ids) | set(phrase_ids))
     guaranteed_set = set(guaranteed_ids)
 
-    # (2) expansions (Arabic only)
+    # (2) expansions (Arabic only) - برضه lexical/pseudo-lexical (LLM لا يدخل)
     expansions, anchors = [], []
     if ar_query:
         expansions, anchors = mine_expansions_ar(q, guaranteed_ids, top_exp=top_expansions)
 
-    # (3) FAISS candidates pool (we will LIMIT non-guaranteed)
+    # (3) FAISS candidates pool
     embed_q = q
     if ar_query and expansions:
         embed_q = normalize_ar(q) + " ; " + " ; ".join(expansions[:8])
@@ -376,7 +542,6 @@ def search_api(query: str,
     else:
         rr_query = f"Find Quran verses that discuss the concept of: {q}. Return verses related by meaning and context."
 
-    # rerank only union_ids (union already limited)
     passages = [build_passage(ix) for ix in union_ids]
     rr_scores = rerank_bge(rr_query, passages, batch_size=rerank_batch, max_length=384)
     rr_map = {int(ix): float(sc) for ix, sc in zip(union_ids, rr_scores)}
@@ -389,10 +554,7 @@ def search_api(query: str,
         row = df_verses.iloc[int(ix)]
         vk = row_to_vkey[int(ix)]
 
-        if ar_query:
-            txt_norm = verse_ar_norm[int(ix)]
-        else:
-            txt_norm = verse_en_norm[int(ix)]
+        txt_norm = verse_ar_norm[int(ix)] if ar_query else verse_en_norm[int(ix)]
 
         # exact word vs exact phrase
         if " " in q_phrase:
@@ -420,7 +582,7 @@ def search_api(query: str,
             priority = 2
         elif guaranteed:
             priority = 1
-        
+
         bucket = "lexical" if priority > 0 else "semantic"
 
         rows.append({
@@ -431,32 +593,91 @@ def search_api(query: str,
             "bucket": bucket,
             "arabic": str(row[AR_DIAC]),
             "english": str(row[EN_COL]),
+            "matched_expansion": matched_exp
         })
 
     df = pd.DataFrame(rows)
     df = df.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
 
-    # ✅ Final filtering (هذا اللي يخلي total منطقي)
+    # ✅ (A) LEXICAL KEEP (NO LLM)
     df_keep = df[df["priority"] > 0].copy()
 
+    # ✅ (B) SEMANTIC candidates
     df_sem = df[df["priority"] == 0].copy()
     df_sem = df_sem.sort_values("score_rr", ascending=False)
 
-    TOP_SEM = 150
-    RR_MIN = -5.0
-    df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM)
+    # بدل TOP_SEM/RR_MIN الثابتة => نستخدم LLM (semantic only)
+    sem_candidates = df_sem.head(max(LLM_MAX_INPUT_VERSES, 1)).to_dict(orient="records")
 
-    df_final = pd.concat([df_keep, df_sem], ignore_index=True)
+    sem_keep_refs = set()
+    sem_meta = {}
+
+    if USE_LLM_SEM_JUDGE and len(sem_candidates) > 0:
+        preds = llm_judge_semantic(q, sem_candidates)  # map ref -> {label, confidence, theme}
+        for r in sem_candidates:
+            ref = r["ref"]
+            p = preds.get(ref, None)
+            if not p:
+                continue
+            lab = p.get("label", "maybe")
+            conf = float(p.get("confidence", 0.45))
+            theme = p.get("theme", "other")
+
+            ok = False
+            if lab == "relevant" and conf >= LLM_CONF_MIN:
+                ok = True
+            elif LLM_KEEP_MAYBE and lab == "maybe" and conf >= (LLM_CONF_MIN + 0.10):
+                ok = True
+
+            if ok:
+                sem_keep_refs.add(ref)
+                sem_meta[ref] = {"llm_label": lab, "llm_conf": conf, "llm_theme": theme}
+
+    # fallback بسيط لو LLM مقفل/فشل: احتفظ بأفضل كم آية حسب reranker
+    if not USE_LLM_SEM_JUDGE:
+        # نفس منطقك القديم لكن بدون رقم ثابت كبير
+        RR_MIN = -5.0
+        TOP_SEM = 150
+        df_sem_keep = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM).copy()
+    else:
+        # فلترة حسب LLM
+        if len(sem_keep_refs) == 0:
+            # لو LLM رفض كل شيء (نادر)، نعطي قليل جداً كاحتياط (اختياري)
+            # ممكن تخليه 0 لو تبين strict 100%
+            df_sem_keep = df_sem.head(10).copy()
+            df_sem_keep["llm_label"] = "fallback"
+            df_sem_keep["llm_conf"] = 0.40
+            df_sem_keep["llm_theme"] = "other"
+        else:
+            df_sem_keep = df_sem[df_sem["ref"].isin(list(sem_keep_refs))].copy()
+            df_sem_keep["llm_label"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_label", ""))
+            df_sem_keep["llm_conf"]  = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_conf", 0.0))
+            df_sem_keep["llm_theme"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_theme", ""))
+
+            # نرتب semantic: أولاً ثقة LLM ثم rr_score
+            df_sem_keep = df_sem_keep.sort_values(["llm_conf", "score_rr"], ascending=[False, False])
+
+    # ✅ Final merge
+    df_final = pd.concat([df_keep, df_sem_keep], ignore_index=True)
     df_final = df_final.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
-
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
 
-    results = df_final[["rank", "ref", "bucket" , "arabic", "english"]].to_dict(orient="records")
+    # output (تقدرين تضيفين llm columns لو تبين في الـ API)
+    keep_cols = ["rank", "ref", "bucket", "arabic", "english"]
+    if USE_LLM_SEM_JUDGE:
+        # اختياري لإظهار سبب قبول semantic
+        if "llm_label" in df_final.columns:
+            keep_cols += ["llm_label", "llm_conf", "llm_theme"]
+
+    results = df_final[keep_cols].to_dict(orient="records")
 
     info = {
         "query": q,
         "ar_query": bool(ar_query),
         "total": int(len(df_final)),
+        "lexical_total": int(len(df_keep)),
+        "semantic_total": int(len(df_sem_keep)),
+        "llm_sem_judge": bool(USE_LLM_SEM_JUDGE),
+        "llm_name": LLM_NAME if USE_LLM_SEM_JUDGE else None
     }
     return results, info
-
