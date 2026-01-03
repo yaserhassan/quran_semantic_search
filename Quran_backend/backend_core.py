@@ -165,8 +165,8 @@ LLM_NAME = (
 LLM_BATCH_SIZE      = int(os.getenv("LLM_BATCH_SIZE", "12"))
 LLM_MAX_NEW_TOKENS   = int(os.getenv("LLM_MAX_NEW_TOKENS", "64"))
 LLM_TEXT_TRIM        = int(os.getenv("LLM_TEXT_TRIM", "280"))
-LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "60"))  # يدخل للـ LLM
-LLM_CONF_MIN         = float(os.getenv("LLM_CONF_MIN", "0.60"))
+LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "50"))  # يدخل للـ LLM
+LLM_CONF_MIN         = float(os.getenv("LLM_CONF_MIN", "0.45"))
 LLM_KEEP_MAYBE       = os.getenv("LLM_KEEP_MAYBE", "0") == "1"
 
 _llm_tokenizer = None
@@ -227,25 +227,45 @@ def _build_llm_prompt_batch(query: str, items: List[Dict[str, str]]) -> str:
     return f"""
 You are a strict relevance judge for Quran verse retrieval.
 
-RULES (must follow):
-- DO NOT rewrite, paraphrase, expand, or change the query.
-- DO NOT generate synonyms or lexical expansions.
-- ONLY decide whether each verse is relevant to the query concept by meaning/context.
-- Output MUST be valid JSON ONLY. No extra text.
-- Return ONLY JSON, no explanation.
+ABSOLUTE OUTPUT FORMAT (critical):
+- Your entire output MUST be a single JSON array.
+- Output MUST start with '[' and end with ']'.
+- Do NOT wrap in markdown (no ```json).
+- Do NOT add any text before or after the JSON.
+- If you output anything else, your output will be discarded.
+
+TASK:
+- Given the query, decide if each verse is relevant by meaning/context (NOT keyword match).
+- Do NOT rewrite or expand the query.
+- Do NOT generate synonyms.
+
+LABELS:
+- "relevant": clearly about the query concept by meaning/context.
+- "not_relevant": not about the concept.
+- "maybe": partially related or unclear.
+
+CONFIDENCE:
+- A number from 0.0 to 1.0.
+
+THEME:
+- Choose ONE tag from:
+  ["qiyamah","akhirah","hisab","general_reminder","dua","warning","law","story","other"]
+- If unsure, use "other". (Do not invent new tags.)
+
+EXAMPLE OUTPUT (format only):
+[
+  {{"ref":"2:25","label":"relevant","confidence":0.78,"theme":"akhirah"}},
+  {{"ref":"2:26","label":"not_relevant","confidence":0.74,"theme":"other"}}
+]
 
 Query: {query}
-
-Decide for each item:
-label: one of ["relevant","not_relevant","maybe"]
-confidence: number from 0.0 to 1.0
-theme: short tag like ["qiyamah","akhirah","hisab","general_reminder","dua","warning","law","story","other"]
 
 INPUT_ITEMS_JSON:
 {payload}
 
-Return JSON array of same length, each object:
-{{"ref":"<ref>","label":"...","confidence":0.0,"theme":"..."}}
+Return ONLY the JSON array of the same length as INPUT_ITEMS_JSON.
+Each object MUST be:
+{{"ref":"<ref>","label":"relevant|not_relevant|maybe","confidence":0.0,"theme":"<tag>"}}
 """.strip()
 
 @torch.inference_mode()
