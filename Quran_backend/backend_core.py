@@ -659,7 +659,18 @@ def search_api(query: str,
     if USE_LLM_SEM_JUDGE:
         keep_cols += ["llm_label", "llm_conf", "llm_theme"]
 
+
+    # --- SAFETY: make sure llm columns always exist when enabled ---
+    if USE_LLM_SEM_JUDGE:
+        if "llm_label" not in df_final.columns:
+            df_final["llm_label"] = ""
+        if "llm_conf" not in df_final.columns:
+            df_final["llm_conf"] = 0.0
+        if "llm_theme" not in df_final.columns:
+            df_final["llm_theme"] = ""
+
     results = df_final.reindex(columns=keep_cols, fill_value="").to_dict(orient="records")
+
 
     info = {
         "query": q,
