@@ -659,7 +659,7 @@ def search_api(query: str,
     if USE_LLM_SEM_JUDGE:
         keep_cols += ["llm_label", "llm_conf", "llm_theme"]
 
-    results = df_final[keep_cols].to_dict(orient="records")
+    results = df_final.reindex(columns=keep_cols, fill_value="").to_dict(orient="records")
 
     info = {
         "query": q,
