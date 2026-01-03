@@ -660,6 +660,7 @@ def search_api(query: str,
         keep_cols += ["llm_label", "llm_conf", "llm_theme"]
 
 
+
     # --- SAFETY: make sure llm columns always exist when enabled ---
     if USE_LLM_SEM_JUDGE:
         if "llm_label" not in df_final.columns:
