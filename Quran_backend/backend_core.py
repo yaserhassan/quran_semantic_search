@@ -477,6 +477,8 @@ def mine_expansions_ar(query_ar: str, guaranteed_ids: List[int], top_exp=20) -> 
             break
     return final, anchors
 
+EXPANSIONS_ENABLED = os.getenv("EXPANSIONS_ENABLED", "1") == "1"
+
 # ===================== Main Search =====================
 def search_api(query: str,
                k_faiss: int = 1200,
@@ -506,8 +508,9 @@ def search_api(query: str,
 
     # (2) expansions (Arabic only) - lexical mining
     expansions = []
-    if ar_query:
+    if ar_query and EXPANSIONS_ENABLED and top_expansions > 0:
         expansions, anchors = mine_expansions_ar(q, guaranteed_ids, top_exp=top_expansions)
+
 
     # (3) FAISS candidates pool
     embed_q = q
