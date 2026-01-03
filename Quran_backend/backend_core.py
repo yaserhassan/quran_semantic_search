@@ -25,6 +25,8 @@ AR_NOD   = "Quran without diacritic"
 EN_COL   = "Translation in English"
 SURA_COL = "Chapter"
 AYAH_COL = "No verse in Chapter"
+AR_EXACT = "fixed_words"
+
 
 M_SURA_COL   = "Sura_No"
 M_AYAH_COL   = "Verse_No"
@@ -81,15 +83,19 @@ df_verses = pd.read_excel(QURAN_PATH)
 df_maqas  = pd.read_excel(MAQAS_PATH)
 
 print("Loading embeddings/index...")
-embeddings = np.load(EMB_PATH).astype("float32")
 index = faiss.read_index(INDEX_PATH)
 
-assert len(df_verses) == index.ntotal == embeddings.shape[0], "Mismatch embeddings/index/df_verses!"
+assert len(df_verses) == index.ntotal, \
+       "Mismatch df_verses vs faiss index!"
+
 print("Verses:", len(df_verses), "| MAQAS rows:", len(df_maqas), "| Index:", index.ntotal)
 
-# Pre-normalize verse text for fast phrase matching
-verse_ar_norm = df_verses[AR_NOD].astype(str).map(normalize_ar).tolist()
+
+# Pre-normalize verse text
+verse_ar_norm = df_verses[AR_NOD].astype(str).map(normalize_ar).tolist()          # ✅ نص الآية الكامل (للتوسعات وغيرها)
+verse_ar_exact_norm = df_verses[AR_EXACT].astype(str).map(normalize_ar).tolist() # ✅ fixed_words (للـ exact match فقط)
 verse_en_norm = df_verses[EN_COL].astype(str).map(normalize_en).tolist()
+
 
 # vkey maps
 vkey_to_row: Dict[str, int] = {}
@@ -383,7 +389,8 @@ def exact_phrase_hits_ar(phrase_ar: str) -> List[int]:
     ph = normalize_ar(phrase_ar)
     if not ph:
         return []
-    return [i for i, txt in enumerate(verse_ar_norm) if ph in txt]
+    return [i for i, txt in enumerate(verse_ar_exact_norm) if ph in txt]
+
 
 def exact_phrase_hits_en(phrase_en: str) -> List[int]:
     ph = normalize_en(phrase_en)
@@ -396,7 +403,8 @@ def exact_word_hits_ar(word_ar: str) -> List[int]:
     if not w:
         return []
     needle = f" {w} "
-    return [i for i, txt in enumerate(verse_ar_norm) if needle in f" {txt} "]
+    return [i for i, txt in enumerate(verse_ar_exact_norm) if needle in f" {txt} "]
+
 
 def exact_word_hits_en(word_en: str) -> List[int]:
     w = normalize_en(word_en)
