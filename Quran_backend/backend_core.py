@@ -195,19 +195,37 @@ def _load_llm_if_needed():
 
 def _safe_json_extract(text: str) -> Any:
     text = (text or "").strip()
+
+    # remove common markdown fences
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    # first try direct
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    m = re.search(r"(\{.*\}|\[.*\])", text, flags=re.DOTALL)
-    if not m:
-        return None
-    chunk = m.group(1).strip()
-    try:
-        return json.loads(chunk)
-    except Exception:
-        return None
+    # try to find the FIRST json array non-greedily
+    m = re.search(r"\[\s*[\s\S]*?\s*\]", text)
+    if m:
+        chunk = m.group(0).strip()
+        try:
+            return json.loads(chunk)
+        except Exception:
+            return None
+
+    # fallback: try first json object
+    m = re.search(r"\{\s*[\s\S]*?\s*\}", text)
+    if m:
+        chunk = m.group(0).strip()
+        try:
+            return json.loads(chunk)
+        except Exception:
+            return None
+
+    return None
+
 
 def _cut(s: str, n: int) -> str:
     s = "" if s is None else str(s).strip()
@@ -317,22 +335,43 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
         new_tokens = gen[0][in_len:]
         decoded = _llm_tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
-        parsed = _safe_json_extract(decoded)
-        if not isinstance(parsed, list):
-            parsed = [{"ref": it["ref"], "label": "maybe", "confidence": 0.45, "theme": "other"} for it in items]
+    parsed = _safe_json_extract(decoded)
 
-        pred_map = {str(x.get("ref", "")): x for x in parsed if isinstance(x, dict)}
+    # if parsing failed or not a list => fallback
+    if not isinstance(parsed, list):
+        parsed = [{"ref": it["ref"], "label": "maybe", "confidence": 0.45, "theme": "other"} for it in items]
 
-        for key, r in chunk:
-            ref = r["ref"]
-            x = pred_map.get(ref, {"ref": ref, "label": "maybe", "confidence": 0.45, "theme": "other"})
-            rec = {
-                "label": str(x.get("label", "maybe")),
-                "confidence": float(x.get("confidence", 0.45)),
-                "theme": str(x.get("theme", "other")),
-            }
-            _llm_cache[key] = rec
-            out[ref] = rec
+    # normalize refs in model output
+    norm_list = []
+    for x in parsed:
+        if isinstance(x, dict):
+            x_ref = str(x.get("ref", "")).strip()
+            x["ref"] = x_ref
+            norm_list.append(x)
+
+    pred_map = {x.get("ref",""): x for x in norm_list if x.get("ref","")}
+
+    # EXTRA fallback: if pred_map is empty or refs don't match, map by order
+    use_order_fallback = (len(pred_map) == 0)
+
+    for i, (key, r) in enumerate(chunk):
+        ref = str(r["ref"]).strip()
+
+        if use_order_fallback and i < len(norm_list):
+            x = norm_list[i]
+        else:
+            x = pred_map.get(ref)
+
+        if not isinstance(x, dict):
+            x = {"ref": ref, "label": "maybe", "confidence": 0.45, "theme": "other"}
+
+        rec = {
+            "label": str(x.get("label", "maybe")).strip().lower(),
+            "confidence": float(x.get("confidence", 0.45)),
+            "theme": str(x.get("theme", "other")).strip(),
+        }
+        _llm_cache[key] = rec
+        out[ref] = rec
 
     return out
 
@@ -550,7 +589,7 @@ def search_api(
             ok = False
             if lab == "relevant" and conf >= LLM_CONF_MIN:
                 ok = True
-            elif LLM_KEEP_MAYBE and lab == "maybe" and conf >= (LLM_CONF_MIN + 0.10):
+            elif LLM_KEEP_MAYBE and lab == "maybe" and conf >= LLM_CONF_MIN:
                 ok = True
 
             if ok:
