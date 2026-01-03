@@ -598,7 +598,7 @@ def search_api(
 
         _log(f"[LLM] judged={len(sem_candidates)} | kept={len(sem_keep_refs)} | conf_min={LLM_CONF_MIN}")
 
-    SEM_RETURN_TOPN = int(os.getenv("SEM_RETURN_TOPN", "10"))
+    SEM_RETURN_TOPN = int(os.getenv("SEM_RETURN_TOPN", "20"))
 
     # (6) build df_sem_keep
     if not USE_LLM_SEM_JUDGE:
