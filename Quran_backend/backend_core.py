@@ -597,42 +597,12 @@ def search_api(
                 sem_meta[ref] = {"llm_label": lab, "llm_conf": conf, "llm_theme": theme}
 
         _log(f"[LLM] judged={len(sem_candidates)} | kept={len(sem_keep_refs)} | conf_min={LLM_CONF_MIN}")
-
+    
     SEM_RETURN_TOPN = int(os.getenv("SEM_RETURN_TOPN", "10"))
+    df_sem = df_sem.sort_values("score_rr", ascending=False)
 
-    # (6) build df_sem_keep
-    if not USE_LLM_SEM_JUDGE:
-        df_sem_keep = df_sem.head(SEM_RETURN_TOPN).copy()
-    else:
-        if len(sem_keep_refs) == 0:
-            df_sem_keep = df_sem.head(0).copy()
-        else:
-            df_sem_keep = df_sem[df_sem["ref"].isin(list(sem_keep_refs))].copy()
-            df_sem_keep["llm_label"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_label", ""))
-            df_sem_keep["llm_conf"]  = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_conf", 0.0))
-            df_sem_keep["llm_theme"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_theme", "other"))
-            df_sem_keep = df_sem_keep.sort_values(
-                ["llm_conf", "score_rr"], ascending=[False, False]
-            )
-
-    # ===== Fallback fill to always return TOP-10 semantic =====
-
-    # قص اللي نجح من LLM
-    df_sem_keep = df_sem_keep.head(SEM_RETURN_TOPN).copy()
-
-    need = SEM_RETURN_TOPN - len(df_sem_keep)
-    if need > 0:
-        existing = set(df_sem_keep["ref"].astype(str))
-        df_fill = df_sem[~df_sem["ref"].astype(str).isin(existing)].head(need).copy()
-
-        # تعليم fallback بوضوح
-        df_fill["llm_label"] = "fallback"
-        df_fill["llm_conf"]  = 0.0
-        df_fill["llm_theme"] = "fallback"
-
-        df_sem_keep = pd.concat([df_sem_keep, df_fill], ignore_index=True)
-
-        print(f"[SEM-FILL] kept_from_llm={SEM_RETURN_TOPN-need} | filled={need} | final_sem={len(df_sem_keep)}")
+    # (6) build df_sem_keep (NO LLM)
+    df_sem_keep = df_sem.head(SEM_RETURN_TOPN).copy()
 
     df_final = pd.concat([df_keep, df_sem_keep], ignore_index=True)
     df_final = df_final.sort_values(
@@ -640,7 +610,6 @@ def search_api(
     ).reset_index(drop=True)
 
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
-
 
 
     # ensure LLM cols exist if enabled (NO KeyError forever)
