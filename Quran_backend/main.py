@@ -102,7 +102,7 @@ class VerseResult(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     k_faiss: int = 1200
-    top_expansions: int = 12
+
 
 class SearchResponse(BaseModel):
     query: str
@@ -215,7 +215,6 @@ def search(req: SearchRequest, current_user: str = Header(None, alias="Authoriza
     results, info = search_api(
         req.query,
         k_faiss=req.k_faiss,
-        top_expansions=req.top_expansions,
         rerank_batch=32
     )
 

@@ -27,7 +27,6 @@ SURA_COL = "Chapter"
 AYAH_COL = "No verse in Chapter"
 AR_EXACT = "fixed_words"
 
-
 M_SURA_COL   = "Sura_No"
 M_AYAH_COL   = "Verse_No"
 M_NODIAC_COL = "Without_Diacritics"
@@ -57,22 +56,21 @@ def normalize_en(s: str) -> str:
     return s
 
 def is_arabic(text: str) -> bool:
-    return re.search(r'[\u0600-\u06FF]', str(text)) is not None
+    return re.search(r"[\u0600-\u06FF]", str(text)) is not None
 
-def vkey(sura:int, ayah:int) -> str:
+def vkey(sura: int, ayah: int) -> str:
     return f"{int(sura)}:{int(ayah)}"
-
-# ===================== Stopwords for expansions =====================
-AR_STOP = set([
-    "من","في","على","الى","إلى","عن","ما","لا","لم","لن","قد","ان","إن","أن","او","أو","ثم",
-    "و","ف","ب","ك","ل","ال","هذا","هذه","ذلك","تلك","هو","هي","هم","هن","انت","أنت","نحن",
-    "كان","كانت","يكون","يكونون","الذين","التي","الذي","بينهم","فيما","الي"
-])
 
 try:
     print("BACKEND_CORE LOADED FROM:", __file__)
 except Exception:
     print("BACKEND_CORE LOADED ✅")
+
+# ===================== Debug logging =====================
+DEBUG_SEARCH = os.getenv("DEBUG_SEARCH", "1") == "1"
+def _log(msg: str):
+    if DEBUG_SEARCH:
+        print(msg, flush=True)
 
 # ===================== Device =====================
 _device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -85,17 +83,13 @@ df_maqas  = pd.read_excel(MAQAS_PATH)
 print("Loading embeddings/index...")
 index = faiss.read_index(INDEX_PATH)
 
-assert len(df_verses) == index.ntotal, \
-       "Mismatch df_verses vs faiss index!"
-
+assert len(df_verses) == index.ntotal, "Mismatch df_verses vs faiss index!"
 print("Verses:", len(df_verses), "| MAQAS rows:", len(df_maqas), "| Index:", index.ntotal)
 
-
 # Pre-normalize verse text
-verse_ar_norm = df_verses[AR_NOD].astype(str).map(normalize_ar).tolist()          # ✅ نص الآية الكامل (للتوسعات وغيرها)
-verse_ar_exact_norm = df_verses[AR_EXACT].astype(str).map(normalize_ar).tolist() # ✅ fixed_words (للـ exact match فقط)
-verse_en_norm = df_verses[EN_COL].astype(str).map(normalize_en).tolist()
-
+verse_ar_norm       = df_verses[AR_NOD].astype(str).map(normalize_ar).tolist()          # full verse (for semantic / general)
+verse_ar_exact_norm = df_verses[AR_EXACT].astype(str).map(normalize_ar).tolist()        # fixed_words (for exact match only)
+verse_en_norm       = df_verses[EN_COL].astype(str).map(normalize_en).tolist()
 
 # vkey maps
 vkey_to_row: Dict[str, int] = {}
@@ -110,17 +104,14 @@ print("Building MAQAS indices...")
 df_m = df_maqas.copy()
 df_m["__morph"] = df_m[M_TYPE_COL].astype(str).str.lower()
 
-# ✅ stem الحقيقي من Segmented_Word في صفوف Stem
+# stem الحقيقي من Segmented_Word في صفوف Stem
 df_m["__stem"] = ""
 mask_stem = df_m["__morph"].str.fullmatch("stem", na=False)
-
 df_m.loc[mask_stem, "__stem"] = df_m.loc[mask_stem, "Segmented_Word"].astype(str).map(normalize_ar)
 
-# gloss كما هو
+# gloss
 df_m["__gloss"] = df_m[M_GLOSS_COL].astype(str).map(normalize_en)
-
 df_stem = df_m[mask_stem].copy()
-
 
 verse_ar_tokens: Dict[str, set] = {}
 verse_en_tokens: Dict[str, set] = {}
@@ -171,17 +162,16 @@ LLM_NAME = (
     or "Qwen/Qwen2.5-1.5B-Instruct"
 )
 
-LLM_BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", "12"))
-LLM_MAX_NEW_TOKENS = int(os.getenv("LLM_MAX_NEW_TOKENS", "64"))
-LLM_TEXT_TRIM = int(os.getenv("LLM_TEXT_TRIM", "280"))
-
-LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "60"))
-LLM_CONF_MIN = float(os.getenv("LLM_CONF_MIN", "0.60"))
-LLM_KEEP_MAYBE = os.getenv("LLM_KEEP_MAYBE", "0") == "1"
+LLM_BATCH_SIZE      = int(os.getenv("LLM_BATCH_SIZE", "12"))
+LLM_MAX_NEW_TOKENS   = int(os.getenv("LLM_MAX_NEW_TOKENS", "64"))
+LLM_TEXT_TRIM        = int(os.getenv("LLM_TEXT_TRIM", "280"))
+LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "60"))  # يدخل للـ LLM
+LLM_CONF_MIN         = float(os.getenv("LLM_CONF_MIN", "0.60"))
+LLM_KEEP_MAYBE       = os.getenv("LLM_KEEP_MAYBE", "0") == "1"
 
 _llm_tokenizer = None
 _llm_model = None
-_llm_cache: Dict[str, Dict[str, Any]] = {}  # cache per (query|ref|arabic|english)
+_llm_cache: Dict[str, Dict[str, Any]] = {}
 
 def _load_llm_if_needed():
     global _llm_tokenizer, _llm_model
@@ -198,7 +188,7 @@ def _load_llm_if_needed():
         device_map="auto",
         torch_dtype=torch.float16,
         load_in_4bit=True,
-        low_cpu_mem_usage=True
+        low_cpu_mem_usage=True,
     )
     _llm_model.eval()
     print("LLM judge ready ✅")
@@ -224,15 +214,12 @@ def _cut(s: str, n: int) -> str:
     return s[:n]
 
 def _build_llm_prompt_batch(query: str, items: List[Dict[str, str]]) -> str:
-    """
-    Strict batch judge: returns JSON array only.
-    """
     lines = []
     for it in items:
         lines.append({
             "ref": it["ref"],
             "arabic": _cut(it.get("arabic",""), LLM_TEXT_TRIM),
-            "english": _cut(it.get("english",""), LLM_TEXT_TRIM)
+            "english": _cut(it.get("english",""), LLM_TEXT_TRIM),
         })
 
     payload = json.dumps(lines, ensure_ascii=False)
@@ -272,6 +259,7 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
 
     out: Dict[str, Dict[str, Any]] = {}
     todo = []
+
     for r in sem_rows:
         key = f"{query}||{r['ref']}||{r.get('arabic','')}||{r.get('english','')}"
         if key in _llm_cache:
@@ -288,7 +276,7 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
         items = [{"ref": r["ref"], "arabic": r.get("arabic",""), "english": r.get("english","")} for _, r in chunk]
         prompt = _build_llm_prompt_batch(query, items)
 
-        messages = [{"role":"user","content":prompt}]
+        messages = [{"role": "user", "content": prompt}]
         if hasattr(_llm_tokenizer, "apply_chat_template"):
             text = _llm_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             inputs = _llm_tokenizer(text, return_tensors="pt").to(_llm_model.device)
@@ -302,7 +290,7 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
             temperature=0.0,
             top_p=1.0,
             repetition_penalty=1.0,
-            eos_token_id=_llm_tokenizer.eos_token_id
+            eos_token_id=_llm_tokenizer.eos_token_id,
         )
 
         in_len = inputs["input_ids"].shape[1]
@@ -313,15 +301,15 @@ def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, 
         if not isinstance(parsed, list):
             parsed = [{"ref": it["ref"], "label": "maybe", "confidence": 0.45, "theme": "other"} for it in items]
 
-        pred_map = {str(x.get("ref","")): x for x in parsed if isinstance(x, dict)}
+        pred_map = {str(x.get("ref", "")): x for x in parsed if isinstance(x, dict)}
 
         for key, r in chunk:
             ref = r["ref"]
-            x = pred_map.get(ref, {"ref":ref, "label":"maybe", "confidence":0.45, "theme":"other"})
+            x = pred_map.get(ref, {"ref": ref, "label": "maybe", "confidence": 0.45, "theme": "other"})
             rec = {
-                "label": str(x.get("label","maybe")),
+                "label": str(x.get("label", "maybe")),
                 "confidence": float(x.get("confidence", 0.45)),
-                "theme": str(x.get("theme","other"))
+                "theme": str(x.get("theme", "other")),
             }
             _llm_cache[key] = rec
             out[ref] = rec
@@ -346,7 +334,7 @@ def rerank_bge(query: str, passages: List[str], batch_size=16, max_length=384) -
         batch = passages[i:i+batch_size]
         pairs = [[query, p] for p in batch]
         enc = tok_rr(pairs, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
-        enc = {k:v.to(_device) for k,v in enc.items()}
+        enc = {k: v.to(_device) for k, v in enc.items()}
         out = mdl_rr(**enc)
         sc = out.logits.squeeze(-1).detach().float().cpu().numpy()
         scores.extend(sc.tolist())
@@ -391,7 +379,6 @@ def exact_phrase_hits_ar(phrase_ar: str) -> List[int]:
         return []
     return [i for i, txt in enumerate(verse_ar_exact_norm) if ph in txt]
 
-
 def exact_phrase_hits_en(phrase_en: str) -> List[int]:
     ph = normalize_en(phrase_en)
     if not ph:
@@ -405,7 +392,6 @@ def exact_word_hits_ar(word_ar: str) -> List[int]:
     needle = f" {w} "
     return [i for i, txt in enumerate(verse_ar_exact_norm) if needle in f" {txt} "]
 
-
 def exact_word_hits_en(word_en: str) -> List[int]:
     w = normalize_en(word_en)
     if not w:
@@ -413,84 +399,20 @@ def exact_word_hits_en(word_en: str) -> List[int]:
     needle = f" {w} "
     return [i for i, txt in enumerate(verse_en_norm) if needle in f" {txt} "]
 
-# ===================== Expansion mining (Arabic) =====================
-def pick_anchor_tokens_ar(query_ar: str, max_tokens=2) -> List[str]:
-    toks = [t for t in normalize_ar(query_ar).split() if t and t not in AR_STOP and len(t) >= 3]
-    if not toks:
-        toks = [t for t in normalize_ar(query_ar).split() if t and len(t) >= 2 and t not in ("ال",)]
-    seen=set()
-    toks=[t for t in toks if not (t in seen or seen.add(t))]
-    return toks[:max_tokens]
-
-def extract_ngrams_containing_anchor(text: str, anchors: List[str], n_min=2, n_max=4) -> List[str]:
-    words = [w for w in text.split() if w]
-    out = []
-    if not words or not anchors:
-        return out
-    for n in range(n_min, n_max+1):
-        for i in range(0, len(words)-n+1):
-            ng = words[i:i+n]
-            if not any(a in ng for a in anchors):
-                continue
-            if ng[0] in AR_STOP or ng[-1] in AR_STOP:
-                continue
-            content = [t for t in ng if (t not in AR_STOP and len(t) >= 3)]
-            if len(content) < 2:
-                continue
-            out.append(" ".join(ng))
-    return out
-
-def mine_expansions_ar(query_ar: str, guaranteed_ids: List[int], top_exp=20) -> Tuple[List[str], List[str]]:
-    qn = normalize_ar(query_ar)
-    anchors = pick_anchor_tokens_ar(query_ar, max_tokens=2)
-    if not guaranteed_ids or not anchors:
-        return [], anchors
-    from collections import Counter
-    ref_counts = Counter()
-    global_counts = Counter()
-    for txt in verse_ar_norm:
-        for ph in set(extract_ngrams_containing_anchor(txt, anchors, 2, 4)):
-            global_counts[ph] += 1
-    for ix in guaranteed_ids:
-        txt = verse_ar_norm[int(ix)]
-        for ph in set(extract_ngrams_containing_anchor(txt, anchors, 2, 4)):
-            ref_counts[ph] += 1
-    scored = []
-    for ph, c in ref_counts.items():
-        if ph == qn:
-            continue
-        if len(ph) < 5:
-            continue
-        g = global_counts.get(ph, 0)
-        score = c / (g + 1.0)
-        if c >= 2 or len(guaranteed_ids) < 25:
-            scored.append((ph, score, c, g))
-    scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
-    final = []
-    seen = set()
-    for ph, _, _, _ in scored:
-        if ph in seen:
-            continue
-        seen.add(ph)
-        final.append(ph)
-        if len(final) >= top_exp:
-            break
-    return final, anchors
-
-EXPANSIONS_ENABLED = os.getenv("EXPANSIONS_ENABLED", "1") == "1"
-
-# ===================== Main Search =====================
-def search_api(query: str,
-               k_faiss: int = 1200,
-               top_expansions: int = 12,
-               rerank_limit_non_guaranteed: int = 250,
-               rerank_batch: int = 32) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+# ===================== Main Search (NO expansions) =====================
+def search_api(
+    query: str,
+    k_faiss: int = 1200,
+    rerank_limit_non_guaranteed: int = 250,
+    rerank_batch: int = 32
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
 
     q = (query or "").strip()
     if not q:
         return [], {"error": "empty", "total": 0}
 
     ar_query = is_arabic(q)
+    _log(f"[SEARCH] q='{q}' ar={ar_query}")
 
     # (1) guaranteed set (exact word/phrase + MAQAS hits) => lexical only
     if ar_query:
@@ -506,17 +428,11 @@ def search_api(query: str,
     guaranteed_ids = sorted(set(maqas_ids) | set(phrase_ids))
     guaranteed_set = set(guaranteed_ids)
 
-    # (2) expansions (Arabic only) - lexical mining
-    expansions = []
-    if ar_query and EXPANSIONS_ENABLED and top_expansions > 0:
-        expansions, anchors = mine_expansions_ar(q, guaranteed_ids, top_exp=top_expansions)
+    _log(f"[LEX] maqas_vkeys={len(maqas_vkeys)} | maqas_ids={len(maqas_ids)} | "
+         f"exact_ids={len(phrase_ids)} | guaranteed_ids={len(guaranteed_ids)}")
 
-
-    # (3) FAISS candidates pool
+    # (2) FAISS candidates pool (semantic candidates)
     embed_q = q
-    if ar_query and expansions:
-        embed_q = normalize_ar(q) + " ; " + " ; ".join(expansions[:8])
-
     faiss_ids, faiss_scores = faiss_candidate_ids(embed_q, k_retrieve=k_faiss)
     id2fs = {int(i): float(s) for i, s in zip(faiss_ids.tolist(), faiss_scores.tolist())}
 
@@ -524,20 +440,15 @@ def search_api(query: str,
     other_part.sort(key=lambda x: id2fs.get(int(x), -1e9), reverse=True)
     other_part = other_part[:rerank_limit_non_guaranteed]
 
-    # (4) expansion phrase hits
-    exp_phrase_hits = {}
-    if ar_query and expansions:
-        for ph in expansions[:top_expansions]:
-            hits = exact_phrase_hits_ar(ph)
-            if hits:
-                exp_phrase_hits[ph] = hits
-    exp_ids = sorted(set([i for lst in exp_phrase_hits.values() for i in lst])) if exp_phrase_hits else []
+    _log(f"[FAISS] k_faiss={k_faiss} | retrieved={len(faiss_ids)} | other_part={len(other_part)}")
 
-    union_ids = sorted(set(guaranteed_ids) | set(exp_ids) | set(other_part))
+    union_ids = sorted(set(guaranteed_ids) | set(other_part))
+    _log(f"[UNION] union_ids={len(union_ids)}")
+
     if not union_ids:
         return [], {"error": "no candidates", "total": 0}
 
-    # (5) reranker query
+    # (3) reranker query
     if ar_query:
         rr_query = f"أوجد آيات في القرآن تتعلق بمفهوم: {q}. أعد الآيات المرتبطة معنى وسياقًا."
     else:
@@ -547,14 +458,14 @@ def search_api(query: str,
     rr_scores = rerank_bge(rr_query, passages, batch_size=rerank_batch, max_length=384)
     rr_map = {int(ix): float(sc) for ix, sc in zip(union_ids, rr_scores)}
 
-    # (6) build rows + priority layers
+    # (4) build rows + priority layers
     q_phrase = normalize_ar(q) if ar_query else normalize_en(q)
     rows = []
 
     for ix in union_ids:
         row = df_verses.iloc[int(ix)]
         vk = row_to_vkey[int(ix)]
-        txt_norm = verse_ar_norm[int(ix)] if ar_query else verse_en_norm[int(ix)]
+        txt_norm = verse_ar_exact_norm[int(ix)] if ar_query else verse_en_norm[int(ix)]
 
         # exact phrase/word
         if " " in q_phrase:
@@ -562,23 +473,11 @@ def search_api(query: str,
         else:
             is_exact = int(f" {q_phrase} " in f" {txt_norm} ")
 
-        matched_exp = ""
-        is_expansion_hit = 0
-        if ar_query and expansions:
-            for ph in expansions[:top_expansions]:
-                phn = normalize_ar(ph)
-                if phn and phn in txt_norm:
-                    matched_exp = ph
-                    is_expansion_hit = 1
-                    break
-
         guaranteed = 1 if int(ix) in guaranteed_set else 0
 
-        # priority: 3 exact, 2 expansion, 1 guaranteed, 0 semantic
+        # priority: 3 exact, 1 guaranteed, 0 semantic
         if is_exact:
             priority = 3
-        elif is_expansion_hit:
-            priority = 2
         elif guaranteed:
             priority = 1
         else:
@@ -594,28 +493,30 @@ def search_api(query: str,
             "bucket": bucket,
             "arabic": str(row[AR_DIAC]),
             "english": str(row[EN_COL]),
-            "matched_expansion": matched_exp
         })
 
     df = pd.DataFrame(rows)
     df = df.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
 
     df_keep = df[df["priority"] > 0].copy()
+    df_sem  = df[df["priority"] == 0].copy().sort_values("score_rr", ascending=False)
 
-    df_sem = df[df["priority"] == 0].copy().sort_values("score_rr", ascending=False)
+    _log(f"[BUCKETS] lexical(df_keep)={len(df_keep)} | semantic(df_sem_raw)={len(df_sem)}")
 
-    # semantic pool before LLM
+    # (5) semantic pool before LLM
     RR_MIN = -5.0
-    TOP_SEM_TOTAL = 150
+    TOP_SEM_TOTAL = int(os.getenv("TOP_SEM_TOTAL", "150"))  # 150 pool قبل LLM
     df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM_TOTAL)
 
     sem_candidates = df_sem.head(max(LLM_MAX_INPUT_VERSES, 1)).to_dict(orient="records")
+    _log(f"[SEM] sem_pool_after_rrmin={len(df_sem)} | llm_input={len(sem_candidates)} | use_llm={USE_LLM_SEM_JUDGE}")
 
     sem_keep_refs = set()
     sem_meta = {}
 
     if USE_LLM_SEM_JUDGE and len(sem_candidates) > 0:
         preds = llm_judge_semantic(q, sem_candidates)
+
         for r in sem_candidates:
             ref = r["ref"]
             p = preds.get(ref)
@@ -636,42 +537,42 @@ def search_api(query: str,
                 sem_keep_refs.add(ref)
                 sem_meta[ref] = {"llm_label": lab, "llm_conf": conf, "llm_theme": theme}
 
+        _log(f"[LLM] judged={len(sem_candidates)} | kept={len(sem_keep_refs)} | conf_min={LLM_CONF_MIN}")
+
+    # (6) build df_sem_keep
     if not USE_LLM_SEM_JUDGE:
         df_sem_keep = df_sem.copy()
     else:
         if len(sem_keep_refs) == 0:
-            df_sem_keep = df_sem.head(10).copy()
-            df_sem_keep["llm_label"] = "fallback"
-            df_sem_keep["llm_conf"] = 0.40
-            df_sem_keep["llm_theme"] = "other"
+            # IMPORTANT: keep it stable + no KeyError
+            df_sem_keep = df_sem.head(0).copy()
         else:
             df_sem_keep = df_sem[df_sem["ref"].isin(list(sem_keep_refs))].copy()
             df_sem_keep["llm_label"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_label", ""))
             df_sem_keep["llm_conf"]  = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_conf", 0.0))
-            df_sem_keep["llm_theme"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_theme", ""))
+            df_sem_keep["llm_theme"] = df_sem_keep["ref"].map(lambda x: sem_meta.get(x, {}).get("llm_theme", "other"))
             df_sem_keep = df_sem_keep.sort_values(["llm_conf", "score_rr"], ascending=[False, False])
 
     df_final = pd.concat([df_keep, df_sem_keep], ignore_index=True)
     df_final = df_final.sort_values(["priority", "score_rr"], ascending=[False, False]).reset_index(drop=True)
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
 
-    keep_cols = ["rank", "ref", "bucket", "arabic", "english"]
-    if USE_LLM_SEM_JUDGE:
-        keep_cols += ["llm_label", "llm_conf", "llm_theme"]
-
-
-
-    # --- SAFETY: make sure llm columns always exist when enabled ---
+    # ensure LLM cols exist if enabled (NO KeyError forever)
     if USE_LLM_SEM_JUDGE:
         if "llm_label" not in df_final.columns:
             df_final["llm_label"] = ""
         if "llm_conf" not in df_final.columns:
             df_final["llm_conf"] = 0.0
         if "llm_theme" not in df_final.columns:
-            df_final["llm_theme"] = ""
+            df_final["llm_theme"] = "other"
+
+    keep_cols = ["rank", "ref", "bucket", "arabic", "english"]
+    if USE_LLM_SEM_JUDGE:
+        keep_cols += ["llm_label", "llm_conf", "llm_theme"]
 
     results = df_final.reindex(columns=keep_cols, fill_value="").to_dict(orient="records")
 
+    _log(f"[FINAL] total={len(df_final)} | lexical_total={len(df_keep)} | semantic_total={len(df_sem_keep)}")
 
     info = {
         "query": q,
@@ -679,7 +580,10 @@ def search_api(query: str,
         "total": int(len(df_final)),
         "lexical_total": int(len(df_keep)),
         "semantic_total": int(len(df_sem_keep)),
+        "semantic_pool": int(len(df_sem)),
         "llm_sem_judge": bool(USE_LLM_SEM_JUDGE),
-        "llm_name": LLM_NAME if USE_LLM_SEM_JUDGE else None
+        "llm_name": LLM_NAME if USE_LLM_SEM_JUDGE else None,
+        "top_sem_total": int(TOP_SEM_TOTAL),
+        "llm_max_input_verses": int(LLM_MAX_INPUT_VERSES),
     }
     return results, info
