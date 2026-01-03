@@ -1,7 +1,6 @@
 # backend_core.py
 import os
 import re
-import json
 from typing import List, Dict, Tuple, Any
 
 import numpy as np
@@ -9,7 +8,7 @@ import pandas as pd
 import faiss
 import torch
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 pd.set_option("display.max_colwidth", 200)
 
@@ -153,227 +152,14 @@ mdl_rr = AutoModelForSequenceClassification.from_pretrained(reranker_name).to(_d
 mdl_rr.eval()
 print("Ready ✅ on device:", _device)
 
-# ===================== Local LLM Judge (semantic ONLY) =====================
-USE_LLM_SEM_JUDGE = (os.getenv("LLM_FILTER_ENABLED") or os.getenv("USE_LLM_SEM_JUDGE") or "1") == "1"
-
-LLM_NAME = (
-    os.getenv("LLM_MODEL_NAME")
-    or os.getenv("LLM_NAME")
-    or "Qwen/Qwen2.5-1.5B-Instruct"
-)
-
-LLM_BATCH_SIZE      = int(os.getenv("LLM_BATCH_SIZE", "12"))
-LLM_MAX_NEW_TOKENS   = int(os.getenv("LLM_MAX_NEW_TOKENS", "64"))
-LLM_TEXT_TRIM        = int(os.getenv("LLM_TEXT_TRIM", "280"))
-LLM_MAX_INPUT_VERSES = int(os.getenv("LLM_MAX_INPUT_VERSES", "50"))  # يدخل للـ LLM
-LLM_CONF_MIN         = float(os.getenv("LLM_CONF_MIN", "0.45"))
-LLM_KEEP_MAYBE       = os.getenv("LLM_KEEP_MAYBE", "0") == "1"
-
-_llm_tokenizer = None
-_llm_model = None
-_llm_cache: Dict[str, Dict[str, Any]] = {}
-
-def _load_llm_if_needed():
-    global _llm_tokenizer, _llm_model
-    if not USE_LLM_SEM_JUDGE:
-        return
-    if _llm_model is not None and _llm_tokenizer is not None:
-        return
-
-    print(f"Loading local LLM judge: {LLM_NAME} (4bit) ...")
-    _llm_tokenizer = AutoTokenizer.from_pretrained(LLM_NAME, use_fast=True)
-
-    _llm_model = AutoModelForCausalLM.from_pretrained(
-        LLM_NAME,
-        device_map="auto",
-        torch_dtype=torch.float16,
-        load_in_4bit=True,
-        low_cpu_mem_usage=True,
-    )
-    _llm_model.eval()
-    print("LLM judge ready ✅")
-
-def _safe_json_extract(text: str) -> Any:
-    text = (text or "").strip()
-
-    # remove common markdown fences
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-
-    # first try direct
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-
-    # try to find the FIRST json array non-greedily
-    m = re.search(r"\[\s*[\s\S]*?\s*\]", text)
-    if m:
-        chunk = m.group(0).strip()
-        try:
-            return json.loads(chunk)
-        except Exception:
-            return None
-
-    # fallback: try first json object
-    m = re.search(r"\{\s*[\s\S]*?\s*\}", text)
-    if m:
-        chunk = m.group(0).strip()
-        try:
-            return json.loads(chunk)
-        except Exception:
-            return None
-
-    return None
 
 
-def _cut(s: str, n: int) -> str:
-    s = "" if s is None else str(s).strip()
-    return s[:n]
 
-def _build_llm_prompt_batch(query: str, items: List[Dict[str, str]]) -> str:
-    lines = []
-    for it in items:
-        lines.append({
-            "ref": it["ref"],
-            "arabic": _cut(it.get("arabic",""), LLM_TEXT_TRIM),
-            "english": _cut(it.get("english",""), LLM_TEXT_TRIM),
-        })
 
-    payload = json.dumps(lines, ensure_ascii=False)
 
-    return f"""
-You are a strict relevance judge for Quran verse retrieval.
 
-ABSOLUTE OUTPUT FORMAT (critical):
-- Your entire output MUST be a single JSON array.
-- Output MUST start with '[' and end with ']'.
-- Do NOT wrap in markdown (no ```json).
-- Do NOT add any text before or after the JSON.
-- If you output anything else, your output will be discarded.
 
-TASK:
-- Given the query, decide if each verse is relevant by meaning/context (NOT keyword match).
-- Do NOT rewrite or expand the query.
-- Do NOT generate synonyms.
 
-LABELS:
-- "relevant": clearly about the query concept by meaning/context.
-- "not_relevant": not about the concept.
-- "maybe": partially related or unclear.
-
-CONFIDENCE:
-- A number from 0.0 to 1.0.
-
-THEME:
-- Choose ONE tag from:
-  ["qiyamah","akhirah","hisab","general_reminder","dua","warning","law","story","other"]
-- If unsure, use "other". (Do not invent new tags.)
-
-EXAMPLE OUTPUT (format only):
-[
-  {{"ref":"2:25","label":"relevant","confidence":0.78,"theme":"akhirah"}},
-  {{"ref":"2:26","label":"not_relevant","confidence":0.74,"theme":"other"}}
-]
-
-Query: {query}
-
-INPUT_ITEMS_JSON:
-{payload}
-
-Return ONLY the JSON array of the same length as INPUT_ITEMS_JSON.
-Each object MUST be:
-{{"ref":"<ref>","label":"relevant|not_relevant|maybe","confidence":0.0,"theme":"<tag>"}}
-""".strip()
-
-@torch.inference_mode()
-def llm_judge_semantic(query: str, sem_rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    if not USE_LLM_SEM_JUDGE:
-        return {}
-
-    _load_llm_if_needed()
-    if _llm_model is None:
-        return {}
-
-    out: Dict[str, Dict[str, Any]] = {}
-    todo = []
-
-    for r in sem_rows:
-        key = f"{query}||{r['ref']}||{r.get('arabic','')}||{r.get('english','')}"
-        if key in _llm_cache:
-            out[r["ref"]] = _llm_cache[key]
-        else:
-            todo.append((key, r))
-
-    if not todo:
-        return out
-
-    CHUNK = max(1, LLM_BATCH_SIZE)
-    for i in range(0, len(todo), CHUNK):
-        chunk = todo[i:i+CHUNK]
-        items = [{"ref": r["ref"], "arabic": r.get("arabic",""), "english": r.get("english","")} for _, r in chunk]
-        prompt = _build_llm_prompt_batch(query, items)
-
-        messages = [{"role": "user", "content": prompt}]
-        if hasattr(_llm_tokenizer, "apply_chat_template"):
-            text = _llm_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = _llm_tokenizer(text, return_tensors="pt").to(_llm_model.device)
-        else:
-            inputs = _llm_tokenizer(prompt, return_tensors="pt", truncation=True).to(_llm_model.device)
-
-        gen = _llm_model.generate(
-            **inputs,
-            max_new_tokens=LLM_MAX_NEW_TOKENS,
-            do_sample=False,
-            temperature=0.0,
-            top_p=1.0,
-            repetition_penalty=1.0,
-            eos_token_id=_llm_tokenizer.eos_token_id,
-        )
-
-        in_len = inputs["input_ids"].shape[1]
-        new_tokens = gen[0][in_len:]
-        decoded = _llm_tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-
-    parsed = _safe_json_extract(decoded)
-
-    # if parsing failed or not a list => fallback
-    if not isinstance(parsed, list):
-        parsed = [{"ref": it["ref"], "label": "maybe", "confidence": 0.45, "theme": "other"} for it in items]
-
-    # normalize refs in model output
-    norm_list = []
-    for x in parsed:
-        if isinstance(x, dict):
-            x_ref = str(x.get("ref", "")).strip()
-            x["ref"] = x_ref
-            norm_list.append(x)
-
-    pred_map = {x.get("ref",""): x for x in norm_list if x.get("ref","")}
-
-    # EXTRA fallback: if pred_map is empty or refs don't match, map by order
-    use_order_fallback = (len(pred_map) == 0)
-
-    for i, (key, r) in enumerate(chunk):
-        ref = str(r["ref"]).strip()
-
-        if use_order_fallback and i < len(norm_list):
-            x = norm_list[i]
-        else:
-            x = pred_map.get(ref)
-
-        if not isinstance(x, dict):
-            x = {"ref": ref, "label": "maybe", "confidence": 0.45, "theme": "other"}
-
-        rec = {
-            "label": str(x.get("label", "maybe")).strip().lower(),
-            "confidence": float(x.get("confidence", 0.45)),
-            "theme": str(x.get("theme", "other")).strip(),
-        }
-        _llm_cache[key] = rec
-        out[ref] = rec
-
-    return out
 
 # ===================== Core helpers =====================
 def faiss_candidate_ids(query_text: str, k_retrieve: int = 1800):
@@ -490,8 +276,19 @@ def search_api(
     _log(f"[LEX] maqas_vkeys={len(maqas_vkeys)} | maqas_ids={len(maqas_ids)} | "
          f"exact_ids={len(phrase_ids)} | guaranteed_ids={len(guaranteed_ids)}")
 
+    SEM_USE_MAQAS_EXPANSION = os.getenv("SEM_USE_MAQAS_EXPANSION", "1") == "1"
+    SEM_EXPAND_TOPN = int(os.getenv("SEM_EXPAND_TOPN", "8"))  # خله 6-12 ممتاز
+
     # (2) FAISS candidates pool (semantic candidates)
     embed_q = q
+    if SEM_USE_MAQAS_EXPANSION and toks:
+        toks_use = toks[:SEM_EXPAND_TOPN]
+        embed_q = " | ".join([q] + toks_use)
+
+    _log(f"[SEM-Q] embed_q='{embed_q}'")
+
+
+
     faiss_ids, faiss_scores = faiss_candidate_ids(embed_q, k_retrieve=k_faiss)
     id2fs = {int(i): float(s) for i, s in zip(faiss_ids.tolist(), faiss_scores.tolist())}
 
@@ -567,37 +364,9 @@ def search_api(
     TOP_SEM_TOTAL = int(os.getenv("TOP_SEM_TOTAL", "150"))  # 150 pool قبل LLM
     df_sem = df_sem[df_sem["score_rr"] >= RR_MIN].head(TOP_SEM_TOTAL)
 
-    sem_candidates = df_sem.head(max(LLM_MAX_INPUT_VERSES, 1)).to_dict(orient="records")
-    _log(f"[SEM] sem_pool_after_rrmin={len(df_sem)} | llm_input={len(sem_candidates)} | use_llm={USE_LLM_SEM_JUDGE}")
 
-    sem_keep_refs = set()
-    sem_meta = {}
 
-    if USE_LLM_SEM_JUDGE and len(sem_candidates) > 0:
-        preds = llm_judge_semantic(q, sem_candidates)
 
-        for r in sem_candidates:
-            ref = r["ref"]
-            p = preds.get(ref)
-            if not p:
-                continue
-
-            lab = p.get("label", "maybe")
-            conf = float(p.get("confidence", 0.45))
-            theme = p.get("theme", "other")
-
-            ok = False
-            if lab == "relevant" and conf >= LLM_CONF_MIN:
-                ok = True
-            elif LLM_KEEP_MAYBE and lab == "maybe" and conf >= LLM_CONF_MIN:
-                ok = True
-
-            if ok:
-                sem_keep_refs.add(ref)
-                sem_meta[ref] = {"llm_label": lab, "llm_conf": conf, "llm_theme": theme}
-
-        _log(f"[LLM] judged={len(sem_candidates)} | kept={len(sem_keep_refs)} | conf_min={LLM_CONF_MIN}")
-    
     SEM_RETURN_TOPN = int(os.getenv("SEM_RETURN_TOPN", "10"))
     df_sem = df_sem.sort_values("score_rr", ascending=False)
 
@@ -612,18 +381,8 @@ def search_api(
     df_final.insert(0, "rank", np.arange(1, len(df_final) + 1))
 
 
-    # ensure LLM cols exist if enabled (NO KeyError forever)
-    if USE_LLM_SEM_JUDGE:
-        if "llm_label" not in df_final.columns:
-            df_final["llm_label"] = ""
-        if "llm_conf" not in df_final.columns:
-            df_final["llm_conf"] = 0.0
-        if "llm_theme" not in df_final.columns:
-            df_final["llm_theme"] = "other"
 
-    keep_cols = ["rank", "ref", "bucket", "arabic", "english"]
-    if USE_LLM_SEM_JUDGE:
-        keep_cols += ["llm_label", "llm_conf", "llm_theme"]
+    keep_cols = ["rank","ref","bucket","priority","score_rr","arabic","english"]
 
     results = df_final.reindex(columns=keep_cols, fill_value="").to_dict(orient="records")
 
@@ -636,9 +395,6 @@ def search_api(
         "lexical_total": int(len(df_keep)),
         "semantic_total": int(len(df_sem_keep)),
         "semantic_pool": int(len(df_sem)),
-        "llm_sem_judge": bool(USE_LLM_SEM_JUDGE),
-        "llm_name": LLM_NAME if USE_LLM_SEM_JUDGE else None,
         "top_sem_total": int(TOP_SEM_TOTAL),
-        "llm_max_input_verses": int(LLM_MAX_INPUT_VERSES),
     }
     return results, info
