@@ -107,12 +107,12 @@ function Dashboard({ token, onLogout }) {
             {/* قسم Lexical */}
             {lexicalResults.length > 0 && (
               <>
-                <div className="section-title">🔎 Lexical Matching Layer</div>
+                <div className="section-title"></div>
                 {lexicalResults.map((r) => (
                   <div key={`${r.ref}-${r.rank}`} className="result-card">
                     <div className="result-meta">
                       <span>Rank {r.rank} • Ref {r.ref}</span>
-                      <span className="badge badge-lex">Lexical</span>
+                      <span className="badge badge-lex"></span>
                     </div>
                     <p className="arabic-verse">{r.arabic}</p>
                     <p className="english-verse">{r.english}</p>
@@ -124,12 +124,12 @@ function Dashboard({ token, onLogout }) {
             {/* قسم Semantic */}
             {semanticResults.length > 0 && (
               <>
-                <div className="section-title">🧠 Semantic Retrieval Layer</div>
+                <div className="section-title"></div>
                 {semanticResults.map((r) => (
                   <div key={`${r.ref}-${r.rank}`} className="result-card">
                     <div className="result-meta">
                       <span>Rank {r.rank} • Ref {r.ref}</span>
-                      <span className="badge badge-sem">Semantic</span>
+                      <span className="badge badge-sem"></span>
                     </div>
                     <p className="arabic-verse">{r.arabic}</p>
                     <p className="english-verse">{r.english}</p>
@@ -137,6 +137,34 @@ function Dashboard({ token, onLogout }) {
                 ))}
               </>
             )}
+
+            {results.length > 0 && (
+              <div className="pagination">
+                <button
+                  type="button"
+                  className="btn-outline"
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                >
+                  Prev
+                </button>
+
+                <span className="pagination-info">
+                  Page {currentPage} / {totalPages}
+                </span>
+
+                <button
+                  type="button"
+                  className="btn-outline"
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+
+            
 
           </div>
         </div>
