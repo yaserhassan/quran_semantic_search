@@ -10,13 +10,21 @@ function Dashboard({ token, onLogout }) {
   const RESULTS_PER_PAGE = 10;
   const [currentPage, setCurrentPage] = useState(1);
 
+  const pagedResults = useMemo(() => {
+    const start = (currentPage - 1) * RESULTS_PER_PAGE;
+    const end = start + RESULTS_PER_PAGE;
+    return results.slice(start, end);
+  }, [results, currentPage, RESULTS_PER_PAGE]);
+
   const totalPages = useMemo(() => {
     return Math.max(1, Math.ceil(results.length / RESULTS_PER_PAGE));
-  }, [results.length]);
+  }, [results.length, RESULTS_PER_PAGE]);
 
   useEffect(() => {
-    if (currentPage > totalPages) setCurrentPage(totalPages);
-  }, [results.length, totalPages, currentPage]);
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [results.length, totalPages]);
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -47,10 +55,6 @@ function Dashboard({ token, onLogout }) {
       setLoading(false);
     }
   };
-
-  // تقسيم النتائج إلى قسمين
-  const lexicalResults = results.filter(r => r.bucket === "lexical");
-  const semanticResults = results.filter(r => r.bucket === "semantic");
 
   return (
     <div className="page-bg">
@@ -103,47 +107,31 @@ function Dashboard({ token, onLogout }) {
           )}
 
           <div className="results-list">
+            {pagedResults.map((r) => (
+              <div key={`${r.ref}-${r.rank}`} className="result-card">
+                <div className="result-meta">
+                  <span>Rank {r.rank} • Ref {r.ref}</span>
 
-            {/* قسم Lexical */}
-            {lexicalResults.length > 0 && (
-              <>
-                <div className="section-title"></div>
-                {lexicalResults.map((r) => (
-                  <div key={`${r.ref}-${r.rank}`} className="result-card">
-                    <div className="result-meta">
-                      <span>Rank {r.rank} • Ref {r.ref}</span>
-                      <span className="badge badge-lex"></span>
-                    </div>
-                    <p className="arabic-verse">{r.arabic}</p>
-                    <p className="english-verse">{r.english}</p>
-                  </div>
-                ))}
-              </>
-            )}
+                  {r.bucket === "lexical" ? (
+                    <span className="badge badge-lex"></span>
+                  ) : (
+                    <span className="badge badge-sem"></span>
+                  )}
+                </div>
 
-            {/* قسم Semantic */}
-            {semanticResults.length > 0 && (
-              <>
-                <div className="section-title"></div>
-                {semanticResults.map((r) => (
-                  <div key={`${r.ref}-${r.rank}`} className="result-card">
-                    <div className="result-meta">
-                      <span>Rank {r.rank} • Ref {r.ref}</span>
-                      <span className="badge badge-sem"></span>
-                    </div>
-                    <p className="arabic-verse">{r.arabic}</p>
-                    <p className="english-verse">{r.english}</p>
-                  </div>
-                ))}
-              </>
-            )}
+                <p className="arabic-verse">{r.arabic}</p>
+                <p className="english-verse">{r.english}</p>
+              </div>
+            ))}
 
             {results.length > 0 && (
               <div className="pagination">
                 <button
                   type="button"
                   className="btn-outline"
-                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  onClick={() =>
+                    setCurrentPage((p) => Math.max(1, p - 1))
+                  }
                   disabled={currentPage === 1}
                 >
                   Prev
@@ -156,16 +144,15 @@ function Dashboard({ token, onLogout }) {
                 <button
                   type="button"
                   className="btn-outline"
-                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  onClick={() =>
+                    setCurrentPage((p) => Math.min(totalPages, p + 1))
+                  }
                   disabled={currentPage === totalPages}
                 >
                   Next
                 </button>
               </div>
             )}
-
-            
-
           </div>
         </div>
       </div>
